@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soilactivity"
-version = "0.1.0"
+version = "0.2.0"
 description = "3D reconstruction of radionuclide volumetric activity in soil from MAED measurements."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -23,8 +23,11 @@ accel = ["numba>=0.56.0"]
 dev = ["pytest>=7.0.0", "sphinx>=4.0.0", "matplotlib>=3.5.0"]
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/soilactivity"
-"Bug Tracker" = "https://github.com/yourusername/soilactivity/issues"
+"Homepage" = "https://github.com/Radiationsafety/soilactivity"
+"Bug Tracker" = "https://github.com/Radiationsafety/soilactivity/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"soilactivity.data" = ["*.json"]
