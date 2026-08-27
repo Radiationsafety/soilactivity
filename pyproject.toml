@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soilactivity"
-version = "0.2.0"
+version = "0.3.0"
 description = "3D reconstruction of radionuclide volumetric activity in soil from MAED measurements."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,7 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 accel = ["numba>=0.56.0"]
-dev = ["pytest>=7.0.0", "sphinx>=4.0.0", "matplotlib>=3.5.0"]
+physics = ["xraylib>=4.0.0"]
+dev = ["pytest>=7.0.0", "sphinx>=4.0.0", "matplotlib>=3.5.0", "xraylib>=4.0.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/Radiationsafety/soilactivity"
