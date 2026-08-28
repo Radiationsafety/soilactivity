@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soilactivity"
-version = "0.3.0"
+version = "0.4.0"
 description = "3D reconstruction of radionuclide volumetric activity in soil from MAED measurements."
 readme = "README.md"
 requires-python = ">=3.9"
