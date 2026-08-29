@@ -140,7 +140,31 @@ Zn-65, Sb-124, Am-241, Sr-90, Y-90.
 CGLS, Kaczmarz, SART, FISTA, Gravel, MAXED, SAND-II, BUNKI, Bayes,
 LMfit, SciPy, Mystic, Genetic, CPLEX, QUBO, ODL, zfit и др.
 
-## Пространственная статистика
+### Анализ и интерполяция
+
+| Ноутбук | Описание |
+|---|---|
+| `example06_interpretation.ipynb` | Автоподбор интерполяции, анализ влияния точек, разреженные результаты |
+
+## Пространственная интерполяция
+
+Модуль `soilactivity.spatial_interpolation` — 14 методов + автоподбор + анализ чувствительности:
+
+```python
+from soilactivity import Interpolator2D, InterpolationAutoSelector, MeasurementSensitivityAnalyzer
+
+# Автоподбор лучшего метода
+selector = InterpolationAutoSelector(candidates=['rbf_tps', 'idw', 'barnes', 'cressman'])
+selector.fit(x, y, z)
+result = selector.select()
+print(result['best_method'], result['best_score'])
+
+# Анализ влияния точек (аналог bssunfold unfold_interpret)
+analyzer = MeasurementSensitivityAnalyzer()
+analyzer.fit(x, y, z, method='rbf_tps')
+ranking = analyzer.ranking()  # какие точки больше влияют
+critical = analyzer.critical_points(90)  # top-10% критических
+```
 
 ```python
 from soilactivity import lorenz_curve, lorenz_gini_coefficient

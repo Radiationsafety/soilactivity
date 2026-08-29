@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.0] - 2026-08-29
+### Added
+- **`soilactivity.spatial_interpolation`** — новый модуль пространственной
+  интерполяции с 14 методами и анализом чувствительности:
+  - `Interpolator2D` — единый интерфейс: RBF (4 ядра), Delaunay (3 метода),
+    IDW, Barnes, Cressman, Kriging (pykrige), GP (scikit-learn, 3 ядра)
+  - `InterpolationAutoSelector` — автоподбор лучшего метода через
+    кросс-валидацию (RMSE, MAE, R2, время)
+  - `MeasurementSensitivityAnalyzer` — анализ влияния точек измерений
+    на результат (leave-one-out, perturbation, карта влияния, критические
+    точки). Аналог `unfold_interpret` из bssunfold + pyoptexplain.
+  - `SparseResultInterpolator` — интерполяция разреженных результатов
+    реконструкции на плотную сетку с оценкой неопределённости
+  - `idw_interpolate()`, `barnes_interpolate()`, `cressman_interpolate()`
+  - `AVAILABLE_METHODS` — справочник 14 методов с описаниями
+
+- **`examples/example06_interpretation.ipynb`** (15 ячеек):
+  - Сравнение 6 методов интерполяции МАЭД (автоподбор + визуализация)
+  - Анализ чувствительности: какие точки измерений больше всего
+    влияют на результат реконструкции
+  - Интерполяция разреженных результатов
+
+### Changed
+- `soilactivity.__init__` экспортирует все классы из `spatial_interpolation`
+- Версия → 0.5.0
+
 ## [0.4.0] - 2026-08-29
 ### Added
 - **Примеры реального применения** (examples/):

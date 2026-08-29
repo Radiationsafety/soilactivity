@@ -57,6 +57,16 @@ from .lorenz import lorenz_curve, lorenz_gini_coefficient, lorenz_compactness_ra
 from .correlation import information_correlation_coefficient, entropy
 from .diagnostics import slae_condition_number, slae_error_bound, slae_finer_error_estimate
 from .visibility import compute_visibility_matrix, visibility_radius_mask
+from .spatial_interpolation import (
+    Interpolator2D,
+    InterpolationAutoSelector,
+    SparseResultInterpolator,
+    MeasurementSensitivityAnalyzer,
+    idw_interpolate,
+    barnes_interpolate,
+    cressman_interpolate,
+    AVAILABLE_METHODS,
+)
 from .fredholm import (
     build_fredholm_matrix,
     build_fredholm_matrix_no_vis,
@@ -67,7 +77,7 @@ from .fredholm import (
     vector_to_raster,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = [
     "Unfolder",
     "UnfoldingResult",
@@ -125,4 +135,13 @@ __all__ = [
     "raster_coords",
     "raster_to_vector",
     "vector_to_raster",
+    # Spatial interpolation
+    "Interpolator2D",
+    "InterpolationAutoSelector",
+    "SparseResultInterpolator",
+    "MeasurementSensitivityAnalyzer",
+    "idw_interpolate",
+    "barnes_interpolate",
+    "cressman_interpolate",
+    "AVAILABLE_METHODS",
 ]
