@@ -79,3 +79,101 @@ print(AVAILABLE_MATERIALS())
   Approximating Gamma-Ray Buildup Factors." Nucl. Sci. Eng. 94, 24-35 (1986).
 - Olarinoye I. O. "EXABCal: A program for calculating photon exposure and
   energy absorption buildup factors." MethodsX 6, 1755-1763 (2019).
+
+## Реконструкция ПДА по уравнению Фредгольма
+
+Модуль `soilactivity.reconstructor` — высокоуровневый API для решения
+обратной задачи: восстановление поверхностной плотности активности (ПДА)
+из измерений мощности амбиентного дозного эквивалента (МАЭД) H*(10).
+
+```python
+from soilactivity import SadReconstructor
+import numpy as np
+
+ader_map = np.random.lognormal(0, 0.5, (50, 50))
+
+recon = SadReconstructor(
+    nx=50, ny=50, cell_size=10.0, height_m=1.0,
+    radionuclide='Cs-137', dose_quantity='H_star_10',
+)
+result = recon.reconstruct(ader_map, alpha=1e-11)
+print(f'Activity: {result.total_activity:.3e} Bq')
+print(f'Gini: {result.info["gini_sad"]:.3f}')
+```
+
+| Параметр | Описание | По умолчанию |
+|---|---|---|
+| `nx`, `ny` | Размер растра | — |
+| `cell_size` | Размер ячейки, м (рек. <= 3 м) | — |
+| `height_m` | Высота детектора, м | 1.0 |
+| `radionuclide` | Ключ из KERMA_CONSTANTS | `'Cs-137'` |
+| `dose_quantity` | `H_star_10`, `K_air`, `D_air`, `X` | `'H_star_10'` |
+| `buildings` | Барьеры `[{x,y,width,height}]` | `None` |
+
+### Доступные радионуклиды
+
+Cs-137, Cs-134, Co-60, Co-58, Eu-152, Eu-154, I-131, Ba-140, Zr-95,
+Nb-95, Ru-103, Ru-106, Ce-141, Ce-144, La-140, Mn-54, Fe-59,
+Zn-65, Sb-124, Am-241, Sr-90, Y-90.
+
+## Примеры (examples/)
+
+### Синтетические
+
+| Ноутбук | Описание |
+|---|---|
+| `example00.ipynb` | Фурье-свертка для восстановления карты активности |
+| `example01.ipynb` | 3D Cs-137: MLEM, Tikhонова, matplotlib 3D, Plotly |
+| `example02.ipynb` | SRTM-рельеф, Sr-90, Plotly 3D, интерполяция МАЭД |
+
+### Реальные данные
+
+| Ноутбук | Описание | Источник |
+|---|---|---|
+| `example03_chernobyl.ipynb` | ЧЗО: Cs-137/Sr-90, Фредгольм, Лоренц, Джини | Kashparov (2018, 2020) |
+| `example04_semei.ipynb` | СИП: Cs-137/Sr-90/Co-60, 3 площадки | OSTI, PMC, IAEA |
+| `example05_co60.ipynb` | Промышленный Co-60: барьеры, теневой эффект | Al Tuwaitha, Hanford |
+
+### bssunfold — 66 методов
+
+`examples/bssunfold_methods/` (01–66): TSVD, MLEM, Tikhonov, Landweber,
+CGLS, Kaczmarz, SART, FISTA, Gravel, MAXED, SAND-II, BUNKI, Bayes,
+LMfit, SciPy, Mystic, Genetic, CPLEX, QUBO, ODL, zfit и др.
+
+### Анализ и интерполяция
+
+| Ноутбук | Описание |
+|---|---|
+| `example06_interpretation.ipynb` | Автоподбор интерполяции, анализ влияния точек, разреженные результаты |
+
+## Пространственная интерполяция
+
+Модуль `soilactivity.spatial_interpolation` — 14 методов + автоподбор + анализ чувствительности:
+
+```python
+from soilactivity import Interpolator2D, InterpolationAutoSelector, MeasurementSensitivityAnalyzer
+
+# Автоподбор лучшего метода
+selector = InterpolationAutoSelector(candidates=['rbf_tps', 'idw', 'barnes', 'cressman'])
+selector.fit(x, y, z)
+result = selector.select()
+print(result['best_method'], result['best_score'])
+
+# Анализ влияния точек (аналог bssunfold unfold_interpret)
+analyzer = MeasurementSensitivityAnalyzer()
+analyzer.fit(x, y, z, method='rbf_tps')
+ranking = analyzer.ranking()  # какие точки больше влияют
+critical = analyzer.critical_points(90)  # top-10% критических
+```
+
+```python
+from soilactivity import lorenz_curve, lorenz_gini_coefficient
+
+gini = lorenz_gini_coefficient(activity_map)
+lcx, lcy = lorenz_curve(activity_map)
+cc = lorenz_compactness_ratio(sad_map, ader_map)
+```
+
+## Лицензия
+
+MIT
