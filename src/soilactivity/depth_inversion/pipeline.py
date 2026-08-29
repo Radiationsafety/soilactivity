@@ -1,15 +1,23 @@
-"""DepthInverter: end-to-end pipeline from peak count rates to a(z) + 1-sigma.
-
-Supports both non-parametric (Tikhonov/NNLS with GCV/L-curve/discrepancy)
-and parametric (transport-chemistry-informed profile) inversion.
-
-References
-----------
-- Beck & de Planque (1968) HASL-234.
-- Zombori et al. (1992) IAEA-314.
-- Tyler (2008) J. Environ. Radioact. 99, 143-161.
-- IAEA TRS-472 (2010) — Kd database.
-"""
+/**
+ * DepthInverter: end-to-end pipeline from peak count rates to a(z) + 1-sigma.
+ *
+ * Supports:
+ *  - Non-parametric: Tikhonov, TV/ADMM, FISTA (L1), focusing (MGS),
+ *    CGLS, Landweber, Cimmino, TSVD — with automatic alpha selection.
+ *  - Parametric: transport-chemistry-informed (pulse/exp profiles).
+ *  - Bayesian: EKI ensemble uncertainty, Laplace MAP.
+ *  - Ensemble multi-method with AIC/BIC model selection.
+ *
+ * References
+ * ----------
+ * - Beck & de Planque (1968) HASL-234.
+ * - Zombori et al. (1992) IAEA-314.
+ * - Tyler (2008) J. Environ. Radioact. 99, 143-161.
+ * - IAEA TRS-472 (2010) — Kd database.
+ * - Portniaguine & Zhdanov (1999) Geophysics 64(3):874.
+ * - Vatankhah et al. (2018) GJI 213(1):695.
+ * - Hasan et al. (2022, 2023) J. Environ. Radioact.
+ */
 from __future__ import division, print_function, absolute_import
 
 from dataclasses import dataclass, field
@@ -18,8 +26,15 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .kernels import Detector, build_kernel
-from .solvers import _tikhonov_weighted, _weighted, diff_matrix
-from .criteria import gcv_curve, lcurve_corner, choose_alpha_discrepancy
+from .solvers import (
+    _tikhonov_weighted, _weighted, diff_matrix, depth_scale,
+    tikhonov, tsvd, landweber, cimmino, cgls, fista,
+    tv_admm, focusing_irls,
+)
+from .criteria import (
+    gcv_curve, lcurve_corner, choose_alpha_discrepancy,
+    quasi_optimality, ncp_criterion, snr_criterion,
+)
 from .transport import pulse_profile, exp_profile, DECAY_S
 
 
@@ -77,7 +92,8 @@ class DepthInverter:
     """End-to-end Fredholm depth inversion.
 
     Constructs the kernel K from gamma lines and detector heights,
-    then provides non-parametric and parametric inversion methods.
+    then provides non-parametric, parametric, Bayesian, and ensemble
+    inversion methods.
 
     Parameters
     ----------
@@ -120,7 +136,27 @@ class DepthInverter:
         lmax = np.linalg.svd(A, compute_uv=False)[0] ** 2
         return np.geomspace(lmax * 1e-10, lmax * 1e-1, 48)
 
-    # ------ non-parametric inversion ------
+    def _make_result(self, x, A, b, alpha, method, L, info_extra=None):
+        """Build DepthInversion result from solution vector."""
+        n = len(self.z)
+        try:
+            cov = np.linalg.inv(A.T @ A + alpha * (L.T @ L))
+            a_std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+            areal_std = float(np.sqrt(max(self.dz @ cov @ self.dz, 0.0)))
+        except np.linalg.LinAlgError:
+            a_std = np.zeros(n)
+            areal_std = 0.0
+        areal = float(np.sum(x * self.dz))
+        cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
+        z_med = (float(np.interp(0.5 * areal, cdf, self.z))
+                 if areal > 0 else float(self.z[0]))
+        r = A @ x - b
+        info = {"L": info_extra} if info_extra else {}
+        return DepthInversion(
+            self.z, self.dz, x, a_std, areal, areal_std,
+            z_med, float(r @ r), alpha, method, info)
+
+    # ------ non-parametric Tikhonov inversion ------
     def fit(self, counts, sigma=None, alpha=None, criterion="gcv",
             smoothness=True, nonneg=True):
         """Non-parametric Tikhonov inversion with automatic alpha selection.
@@ -128,16 +164,11 @@ class DepthInverter:
         Parameters
         ----------
         counts : array-like (m,)
-            Measured peak count rates [1/s].
         sigma : array-like (m,) or None
-            Data uncertainties.  Default: Poisson.
         alpha : float or None
-            Fixed regularisation parameter.  If None, selected by *criterion*.
         criterion : {'gcv', 'lcurve', 'discrepancy'}
         smoothness : bool
-            Use first-difference operator L (True) or identity (False).
         nonneg : bool
-            Enforce non-negativity.
 
         Returns
         -------
@@ -160,19 +191,257 @@ class DepthInverter:
             else:
                 raise ValueError("Unknown criterion: {}".format(criterion))
         x = _tikhonov_weighted(A, b, alpha, L=L, nonneg=nonneg)
-        cov = np.linalg.inv(A.T @ A + alpha * (L.T @ L))
-        a_std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        return self._make_result(x, A, b, alpha,
+                                "tikhonov/{}".format(criterion), L,
+                                "diff" if smoothness else "I")
+
+    # ------ TV/ADMM inversion ------
+    def fit_tv(self, counts, sigma=None, alpha=None, criterion="lcurve",
+               rho=1.0, max_iter=500):
+        """Total Variation inversion via ADMM.
+
+        Preserves sharp layer boundaries. Ideal for piecewise-constant
+        contamination profiles.
+
+        Parameters
+        ----------
+        counts, sigma : as in fit()
+        alpha : float or None
+            TV weight.  If None, selected by criterion.
+        criterion : {'lcurve', 'discrepancy'}
+        rho, max_iter : ADMM parameters.
+
+        Returns
+        -------
+        result : DepthInversion
+        """
+        counts = np.asarray(counts, float)
+        if sigma is None:
+            sigma = self.poisson_sigma(counts)
+        A, b = _weighted(self.K, counts, sigma)
+        n = len(self.z)
+        if alpha is None:
+            # Heuristic: TV alpha ~ Tikhonov alpha / 10
+            alphas_tik = self._grid_alphas(A)
+            alpha_tik, _ = lcurve_corner(A, b, alphas_tik)
+            alpha = alpha_tik * 0.1
+        x, info = tv_admm(A, b, alpha, nonneg=True,
+                           rho=rho, max_iter=max_iter)
+        r = A @ x - b
         areal = float(np.sum(x * self.dz))
-        areal_std = float(np.sqrt(max(self.dz @ cov @ self.dz, 0.0)))
         cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
         z_med = (float(np.interp(0.5 * areal, cdf, self.z))
                  if areal > 0 else float(self.z[0]))
+        return DepthInversion(
+            self.z, self.dz, x, np.zeros(n), areal, 0.0,
+            z_med, float(r @ r), alpha, "tv/admm", info)
+
+    # ------ FISTA (L1 sparse) inversion ------
+    def fit_sparse(self, counts, sigma=None, alpha=None, criterion="lcurve",
+                   max_iter=2000):
+        """L1-sparse inversion via FISTA.
+
+        Promotes compact solutions where activity is concentrated
+        in a few thin layers.
+
+        Parameters
+        ----------
+        counts, sigma, alpha, criterion, max_iter : as in fit_tv()
+
+        Returns
+        -------
+        result : DepthInversion
+        """
+        counts = np.asarray(counts, float)
+        if sigma is None:
+            sigma = self.poisson_sigma(counts)
+        A, b = _weighted(self.K, counts, sigma)
+        n = len(self.z)
+        if alpha is None:
+            alphas_tik = self._grid_alphas(A)
+            alpha_tik, _ = lcurve_corner(A, b, alphas_tik)
+            alpha = alpha_tik * 0.05
+        x, info = fista(A, b, alpha, nonneg=True, max_iter=max_iter)
         r = A @ x - b
+        areal = float(np.sum(x * self.dz))
+        cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
+        z_med = (float(np.interp(0.5 * areal, cdf, self.z))
+                 if areal > 0 else float(self.z[0]))
+        return DepthInversion(
+            self.z, self.dz, x, np.zeros(n), areal, 0.0,
+            z_med, float(r @ r), alpha, "fista/l1", info)
+
+    # ------ Focusing (MGS/MS) inversion ------
+    def fit_focusing(self, counts, sigma=None, alpha=None,
+                     mode="mgs", eps_focusing=1e-2):
+        """Focusing (compact) inversion via IRLS.
+
+        Produces blocky/layered models with sharp interfaces
+        (Portniaguine & Zhdanov 1999).
+
+        Parameters
+        ----------
+        counts, sigma : as in fit()
+        alpha : float or None
+        mode : {'mgs', 'ms'}
+        eps_focusing : float
+
+        Returns
+        -------
+        result : DepthInversion
+        """
+        counts = np.asarray(counts, float)
+        if sigma is None:
+            sigma = self.poisson_sigma(counts)
+        A, b = _weighted(self.K, counts, sigma)
+        n = len(self.z)
+        if alpha is None:
+            alphas_tik = self._grid_alphas(A)
+            alpha_tik, _ = lcurve_corner(A, b, alphas_tik)
+            alpha = alpha_tik * 0.5
+        x, info = focusing_irls(A, b, alpha, nonneg=True, mode=mode,
+                                eps_focusing=eps_focusing)
+        r = A @ x - b
+        areal = float(np.sum(x * self.dz))
+        cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
+        z_med = (float(np.interp(0.5 * areal, cdf, self.z))
+                 if areal > 0 else float(self.z[0]))
+        return DepthInversion(
+            self.z, self.dz, x, np.zeros(n), areal, 0.0,
+            z_med, float(r @ r), alpha, "focusing/{}".format(mode), info)
+
+    # ------ CGLS inversion ------
+    def fit_cgls(self, counts, sigma=None, max_iter=500):
+        """CGLS inversion with early stopping.
+
+        Iteration count acts as regularisation parameter (semi-convergence).
+
+        Parameters
+        ----------
+        counts, sigma : as in fit()
+        max_iter : int
+
+        Returns
+        -------
+        result : DepthInversion
+        """
+        counts = np.asarray(counts, float)
+        if sigma is None:
+            sigma = self.poisson_sigma(counts)
+        A, b = _weighted(self.K, counts, sigma)
+        n = len(self.z)
+        x, info = cgls(A, b, sigma=None, nonneg=True, max_iter=max_iter)
+        r = A @ x - b
+        areal = float(np.sum(x * self.dz))
+        cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
+        z_med = (float(np.interp(0.5 * areal, cdf, self.z))
+                 if areal > 0 else float(self.z[0]))
+        return DepthInversion(
+            self.z, self.dz, x, np.zeros(n), areal, 0.0,
+            z_med, float(r @ r), 0.0, "cgls", info)
+
+    # ------ Bayesian EKI ------
+    def fit_eki(self, counts, sigma=None, n_ens=200, n_iter=30,
+                prior_std=1e4, seed=0):
+        """Ensemble Kalman Inversion with uncertainty quantification.
+
+        Parameters
+        ----------
+        counts, sigma : as in fit()
+        n_ens : int
+        n_iter : int
+        prior_std : float
+        seed : int
+
+        Returns
+        -------
+        result : DepthInversion
+        """
+        from .bayesian import ensemble_kalman_inversion
+        counts = np.asarray(counts, float)
+        if sigma is None:
+            sigma = self.poisson_sigma(counts)
+        res = ensemble_kalman_inversion(
+            self.K, counts, sigma=sigma, n_ens=n_ens, n_iter=n_iter,
+            prior_std=prior_std, seed=seed, nonneg=True)
+        x = res["mean"]
+        a_std = res["std"]
+        areal = float(np.sum(x * self.dz))
+        areal_std = float(np.sqrt(self.dz @ np.diag(np.cov(res["ensemble"])) @ self.dz
+                                  if res["ensemble"].shape[0] > 1 else 0))
+        cdf = np.cumsum(np.clip(x, 0.0, None) * self.dz)
+        z_med = (float(np.interp(0.5 * areal, cdf, self.z))
+                 if areal > 0 else float(self.z[0]))
+        r = self.K @ x - counts
+        chi2 = float(np.sum((r / sigma) ** 2))
         return DepthInversion(
             self.z, self.dz, x, a_std, areal, areal_std,
-            z_med, float(r @ r), alpha,
-            "tikhonov/{}".format(criterion),
-            {"L": "diff" if smoothness else "I"})
+            z_med, chi2, 0.0, "eki/n{}".format(n_ens), res)
+
+    # ------ Ensemble multi-method with AIC/BIC ------
+    def fit_ensemble(self, counts, sigma=None, methods=None):
+        """Run multiple inversion methods and select best via AIC/BIC.
+
+        Parameters
+        ----------
+        counts : array-like (m,)
+        sigma : array-like (m,) or None
+        methods : list of str or None
+            Methods to try.  Default: ['tikhonov/gcv', 'tv/admm',
+            'fista/l1', 'focusing/mgs', 'cgls'].
+
+        Returns
+        -------
+        dict with keys:
+            'results' : list of DepthInversion
+                All method results.
+            'best' : DepthInversion
+                Best result by AIC.
+            'aic' : ndarray
+                AIC values for each method.
+            'bic' : ndarray
+                BIC values for each method.
+        """
+        if methods is None:
+            methods = ["tikhonov/gcv", "tv/admm", "fista/l1",
+                       "focusing/mgs", "cgls"]
+        results = []
+        for m in methods:
+            try:
+                if m.startswith("tikhonov/"):
+                    crit = m.split("/")[1]
+                    res = self.fit(counts, sigma=sigma, criterion=crit)
+                elif m == "tv/admm":
+                    res = self.fit_tv(counts, sigma=sigma)
+                elif m == "fista/l1":
+                    res = self.fit_sparse(counts, sigma=sigma)
+                elif m.startswith("focusing/"):
+                    mode = m.split("/")[1]
+                    res = self.fit_focusing(counts, sigma=sigma, mode=mode)
+                elif m == "cgls":
+                    res = self.fit_cgls(counts, sigma=sigma)
+                else:
+                    continue
+                results.append(res)
+            except Exception:
+                continue
+        # Compute AIC/BIC
+        m_data = len(counts)
+        aic = np.empty(len(results))
+        bic = np.empty(len(results))
+        for i, res in enumerate(results):
+            # Effective number of parameters (trace of hat matrix)
+            n_eff = min(np.sum(res.a > 1e-3 * np.max(res.a)), m_data)
+            aic[i] = res.chi2 + 2.0 * n_eff
+            bic[i] = res.chi2 + np.log(m_data) * n_eff
+        best_idx = int(np.argmin(aic))
+        return {
+            "results": results,
+            "best": results[best_idx],
+            "aic": aic,
+            "bic": bic,
+            "method_names": [r.method for r in results],
+        }
 
     # ------ parametric (transport-informed) inversion ------
     def fit_parametric(self, counts, sigma=None, family="pulse",
