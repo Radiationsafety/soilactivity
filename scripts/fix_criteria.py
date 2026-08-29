@@ -1,4 +1,7 @@
-"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy.
+#!/usr/bin/env python3
+"""Fix criteria.py — rewrite with proper formatting."""
+content = '''"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy,
+and geophysical extensions (quasi-optimality, NCP, SNR, weighted GCV).
 
 All operate in the weighted space (A = K/sigma, b = d/sigma).
 
@@ -7,6 +10,9 @@ References
 - Golub, Heath & Wahba (1979) GCV.
 - Hansen (1992, 2006) L-curve.
 - Morozov (1966) discrepancy principle.
+- Hochstenbach & Reichel (2015) parameter determination, J. Comp. Appl. Math.
+- Farquharson & Oldenburg (2004) comparison of automatic techniques, GJI 156(3):411.
+- Chen et al. (2021) comparative studies, Inverse Problems in Sci. & Eng.
 """
 from __future__ import division, print_function, absolute_import
 
@@ -16,19 +22,7 @@ from scipy.optimize import brentq
 
 
 def chi2(K, d, x, sigma=None):
-    """Chi-squared misfit: ||Kx - d||_W^2 where W = diag(1/sigma).
-
-    Parameters
-    ----------
-    K : array-like (m, n)
-    d : array-like (m,)
-    x : array-like (n,)
-    sigma : array-like (m,) or None
-
-    Returns
-    -------
-    chi2 : float
-    """
+    """Chi-squared misfit: ||Kx - d||_W^2 where W = diag(1/sigma)."""
     r = np.asarray(K, float) @ np.asarray(x, float) - np.asarray(d, float)
     if sigma is not None:
         r = r / np.asarray(sigma, float)
@@ -36,9 +30,7 @@ def chi2(K, d, x, sigma=None):
 
 
 def _lin_solve(A, b, alpha, L=None):
-    """Solve the (unconstrained) Tikhonov system, return (x, M).
-    M = A^T A + alpha * L^T L.
-    """
+    """Solve the (unconstrained) Tikhonov system, return (x, M)."""
     n = A.shape[1]
     L = np.eye(n) if L is None else L
     M = A.T @ A + alpha * (L.T @ L)
@@ -53,24 +45,7 @@ def _chi2_alpha(A, b, alpha, L):
 
 
 def gcv_point(A, b, alpha, L=None, n_probe=24, seed=0):
-    """GCV(alpha) = n * ||Ax - b||^2 / tr(I - H)^2.
-
-    The trace is estimated via Hutchinson's stochastic trace estimator
-    with n_probe random +/-1 probe vectors.
-
-    Parameters
-    ----------
-    A : ndarray (m, n)  — weighted system matrix
-    b : ndarray (m,)
-    alpha : float
-    L : ndarray (p, n) or None
-    n_probe : int
-    seed : int
-
-    Returns
-    -------
-    gcv : float
-    """
+    """GCV(alpha) = n * ||Ax - b||^2 / tr(I - H)^2."""
     x, M = _lin_solve(A, b, alpha, L)
     r = A @ x - b
     n = len(b)
@@ -82,12 +57,7 @@ def gcv_point(A, b, alpha, L=None, n_probe=24, seed=0):
 
 
 def gcv_curve(A, b, alphas, L=None, **kw):
-    """Evaluate GCV for a grid of alpha values.
-
-    Returns
-    -------
-    gcv_vals : np.ndarray, shape (len(alphas),)
-    """
+    """Evaluate GCV for a grid of alpha values."""
     return np.array([gcv_point(A, b, a, L, **kw) for a in alphas])
 
 
@@ -102,21 +72,7 @@ def _menger_curvature(p1, p2, p3):
 
 
 def lcurve_corner(A, b, alphas, L=None):
-    """L-curve corner: maximum Menger curvature on (log ||Lx||, log ||r||).
-
-    Parameters
-    ----------
-    A : ndarray (m, n)
-    b : ndarray (m,)
-    alphas : array-like
-    L : ndarray (p, n) or None
-
-    Returns
-    -------
-    alpha_corner : float
-    kappa : ndarray, shape (len(alphas),)
-        Curvature at each alpha (0 at endpoints).
-    """
+    """L-curve corner: maximum Menger curvature on (log ||Lx||, log ||r||)."""
     alphas = np.asarray(alphas, float)
     n = A.shape[1]
     Lf = np.eye(n) if L is None else L
@@ -138,24 +94,7 @@ def lcurve_corner(A, b, alphas, L=None):
 
 def choose_alpha_discrepancy(A, b, L=None, n_target=None,
                               lo=1e-12, hi=1e3):
-    """Morozov discrepancy principle: find alpha such that chi^2(alpha) = n.
-
-    Uses Brent's method on a log-spaced grid.
-
-    Parameters
-    ----------
-    A : ndarray (m, n)
-    b : ndarray (m,)
-    L : ndarray or None
-    n_target : float or None
-        Target chi^2 (default: m = number of data).
-    lo, hi : float
-        Search bounds on alpha.
-
-    Returns
-    -------
-    alpha : float
-    """
+    """Morozov discrepancy principle: find alpha such that chi^2(alpha) = n."""
     n = len(b) if n_target is None else n_target
     grid = np.geomspace(lo, hi, 64)
     vals = np.array([_chi2_alpha(A, b, a, L) for a in grid])
@@ -164,7 +103,7 @@ def choose_alpha_discrepancy(A, b, L=None, n_target=None,
         return float(grid[-1])
     j = int(idx[-1])
     if j >= len(grid) - 1:
-        return float(grid[-1])
+        return float(grid[j])
     try:
         la = brentq(lambda t: _chi2_alpha(A, b, 10.0 ** t, L) - n,
                      np.log10(grid[j]), np.log10(grid[j + 1]), xtol=1e-3)
@@ -173,11 +112,18 @@ def choose_alpha_discrepancy(A, b, L=None, n_target=None,
         return float(grid[j])
 
 
-def quasi_optimality(A, b, alphas, L=None):
-    """Quasi-optimality criterion (Hochstenbach & Reichel, 2015).
+# =====================================================================
+# Geophysical extensions (2015-2025)
+# =====================================================================
 
-    Selects alpha minimising noise-dominated SVD components.
-    Does NOT require noise level estimate.
+def quasi_optimality(A, b, alphas, L=None):
+    """Quasi-optimality criterion (Tikhonov & Glasko, 1965;
+    Hochstenbach & Reichel, 2015).
+
+    Selects alpha that minimises the noise-dominated part of
+    the solution using the SVD. Does NOT require noise level.
+
+    Reference: Hochstenbach & Reichel (2015) J. Comp. Appl. Math.
     """
     alphas = np.asarray(alphas, float)
     U, sv, Vt = svd(A, full_matrices=False)
@@ -186,16 +132,20 @@ def quasi_optimality(A, b, alphas, L=None):
     for j, alpha in enumerate(alphas):
         mask = sv ** 2 < alpha
         if np.any(mask):
-            qo_vals[j] = float(np.sqrt(np.sum((Ub[mask] / sv[mask]) ** 2)))
+            qo_vals[j] = float(np.sqrt(
+                np.sum((Ub[mask] / sv[mask]) ** 2)))
         else:
             qo_vals[j] = 0.0
     return float(alphas[int(np.argmin(qo_vals))]), qo_vals
 
 
 def ncp_criterion(A, b, alphas, L=None):
-    """Normalised Cumulative Periodogram (NCP) residual whiteness test.
+    """Normalised Cumulative Periodogram (NCP) / residual whiteness test.
 
-    Selects alpha where residual is closest to white noise (KS test).
+    Selects alpha where the residual is closest to white noise
+    using the Kolmogorov-Smirnov statistic on the periodogram CDF.
+
+    Reference: Hansen (1992), Farquharson & Oldenburg (2004).
     """
     alphas = np.asarray(alphas, float)
     m = len(b)
@@ -218,9 +168,12 @@ def ncp_criterion(A, b, alphas, L=None):
 
 
 def snr_criterion(A, b, alphas, L=None):
-    """Signal-to-Noise Ratio criterion.
+    """Signal-to-Noise Ratio (SNR) criterion.
 
-    Selects alpha maximising estimated SNR of the solution.
+    Selects alpha that maximises the estimated SNR of the solution.
+    SNR = ||x||^2 / tr(Cov(x)) where Cov = sigma^2 (A^T A + alpha I)^{-1}.
+
+    Reference: Farquharson & Oldenburg (2004) GJI 156(3):411.
     """
     alphas = np.asarray(alphas, float)
     m, n = A.shape
@@ -237,8 +190,13 @@ def snr_criterion(A, b, alphas, L=None):
     return float(alphas[int(np.argmax(snr_vals))]), snr_vals
 
 
-def gcv_weighted(A, b, alpha, L=None, sigma_data=None, n_probe=24, seed=0):
-    """Weighted GCV for heteroscedastic noise (Poisson)."""
+def gcv_weighted(A, b, alpha, L=None, sigma_data=None, n_probe=24,
+                   seed=0):
+    """Weighted GCV with heteroscedastic (per-point) noise model.
+
+    For Poisson statistics (sigma_i = sqrt(n_i)), standard GCV is
+    biased.  This criterion accounts for heteroscedastic noise.
+    """
     if sigma_data is None:
         return gcv_point(A, b, alpha, L, n_probe, seed)
     w = 1.0 / (np.asarray(sigma_data, float) ** 2)
@@ -263,7 +221,11 @@ def gcv_weighted_curve(A, b, alphas, L=None, sigma_data=None, **kw):
 
 
 def lcurve_corner_iter(hist_residual, hist_solution_norm):
-    """L-curve corner for iterative methods (CGLS, Landweber)."""
+    """L-curve corner detection for iterative methods (CGLS, Landweber).
+
+    For iterative solvers, the iteration count IS the regularisation
+    parameter.  Finds the corner from pre-computed histories.
+    """
     r = np.asarray(hist_residual, float)
     s = np.asarray(hist_solution_norm, float)
     eps = 1e-300
@@ -277,3 +239,8 @@ def lcurve_corner_iter(hist_residual, hist_solution_norm):
             (lr[j], ls[j]),
             (lr[j + 1], ls[j + 1]))
     return int(np.argmax(kappa)), kappa
+'''
+
+with open('src/soilactivity/depth_inversion/criteria.py', 'w') as f:
+    f.write(content)
+print('criteria.py rewritten successfully')

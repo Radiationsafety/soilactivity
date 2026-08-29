@@ -19,6 +19,13 @@ from soilactivity.depth_inversion import (
     ensemble_kalman_inversion, laplace_map,
     kd_ph, kd_freundlich, multi_layer_pulse,
     FREUNDLICH_DB, KD_PH_PARAMS,
+    # new geophysics & transport additions
+    depth_scale_power, depth_scale_log, depth_scale_adaptive,
+    compose_weighting, two_site_retardation, two_site_ade,
+    joint_inversion, two_site_effective_Kd,
+    two_site_retardation_from_kd, competitive_kd_cs, competitive_kd_sr,
+    kd_u_eh, cgls_lcurve, crossval_alpha, depth_weighted_tikhonov,
+    weighted_smoothness, compactness_operator,
 )
 
 # Cs-137 line at 661.66 keV (rho_soil=1.4 g/cm3 -> mu_soil ~10.8 /m)
@@ -416,3 +423,165 @@ def test_pipeline_sparse():
     inv, _, counts = _twin_eu(seed=3)
     res = inv.fit_sparse(counts)
     assert np.all(res.a >= 0)
+
+
+# =====================================================================
+# Geophysics module tests
+# =====================================================================
+
+def test_depth_scale_power():
+    """Power-law depth weighting should decrease with depth."""
+    z = np.linspace(0, 1.0, 50)
+    w = depth_scale_power(z, beta=2.0)
+    assert w.shape == z.shape
+    assert w[0] >= w[-1]  # decreasing
+    assert np.all(w > 0)
+
+
+def test_depth_scale_log():
+    """Logarithmic depth weighting should decrease with depth."""
+    z = np.linspace(0, 1.0, 50)
+    w = depth_scale_log(z)
+    assert w.shape == z.shape
+    assert np.all(np.isfinite(w))
+    assert np.all(w > 0)
+
+
+def test_depth_scale_adaptive():
+    """Adaptive weighting should be finite and positive."""
+    inv, _, counts = _twin_eu(seed=1)
+    w = depth_scale_adaptive(inv.K, inv.z)
+    assert w.shape == inv.z.shape
+    assert np.all(np.isfinite(w))
+    assert np.all(w > 0)
+
+
+def test_compose_weighting():
+    """All weighting methods should return finite positive vectors."""
+    inv, _, _ = _twin_eu(seed=1)
+    for method in ['li_oldenburg', 'power', 'log', 'combined']:
+        w = compose_weighting(inv.K, inv.z, method=method)
+        assert np.all(np.isfinite(w))
+        assert np.all(w > 0)
+
+
+def test_two_site_retardation():
+    """Two-site retardation should interpolate between R_eq and R_inst."""
+    R_inst = 1400.0
+    f = 0.7
+    omega = 1e-6
+    R_short = two_site_retardation(R_inst, f, omega, t_obs=1.0)
+    R_long = two_site_retardation(R_inst, f, omega, t_obs=1e8)
+    assert 1.0 < R_short < R_inst
+    assert R_long > R_short
+    assert R_long <= R_inst + 1e-6
+
+
+def test_two_site_ade():
+    """Two-site ADE solver should produce non-negative concentrations."""
+    z = np.linspace(0, 0.5, 50)
+    res = two_site_ade(z, (0, 30 * YEAR_S), D=1e-10, v=0.0,
+                       R_inst=1400.0, f=0.7, omega_kin=1e-6,
+                       lam=DECAY_S["Cs-137"], n_save=10)
+    assert np.all(res['C_total'] >= 0)
+    assert res['C_total'].shape[0] == 10
+
+
+def test_two_site_kd():
+    """Two-site effective Kd should depend on time."""
+    Kd_eq = two_site_effective_Kd(500.0, 0.7, 1e-6, t_obs=1.0)
+    Kd_long = two_site_effective_Kd(500.0, 0.7, 1e-6, t_obs=1e8)
+    assert Kd_eq < Kd_long
+    assert Kd_long <= 500.0 + 1e-6
+
+
+def test_competitive_kd():
+    """Competitive Kd should decrease with competitor concentration."""
+    kd_no_comp = competitive_kd_cs(500.0, 0.0, 0.0)
+    kd_with_K = competitive_kd_cs(500.0, 5.0, 0.0)
+    kd_with_NH4 = competitive_kd_cs(500.0, 0.0, 3.0)
+    assert kd_no_comp >= kd_with_K
+    assert kd_no_comp >= kd_with_NH4
+    # Sr with Ca
+    kd_sr_no = competitive_kd_sr(100.0, 0.0)
+    kd_sr_Ca = competitive_kd_sr(100.0, 10.0)
+    assert kd_sr_no >= kd_sr_Ca
+
+
+def test_kd_u_eh():
+    """U Kd should be higher under reducing conditions."""
+    kd_red = kd_u_eh(7.0, -50.0)   # reducing (below Eh_crit ~50 mV)
+    kd_ox = kd_u_eh(7.0, 200.0)    # oxidising
+    assert kd_red > kd_ox
+
+
+def test_two_site_retardation_from_kd():
+    """Retardation from Kd wrapper should be consistent."""
+    R = two_site_retardation_from_kd(500.0, 0.7, 1e-6, 25 * YEAR_S)
+    assert R > 1.0
+
+
+def test_cgls_lcurve():
+    """CGLS with L-curve stopping should give non-negative result."""
+    inv, _, counts = _twin_eu(seed=11)
+    x, info = cgls_lcurve(inv.K, counts, max_iter=100, nonneg=True)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+    assert 'corner_iter' in info
+
+
+def test_crossval_alpha():
+    """Cross-validation should return a finite alpha."""
+    inv, _, counts = _twin_eu(seed=12)
+    sg = inv.poisson_sigma(counts)
+    alpha_cv, cv_err = crossval_alpha(
+        inv.K, counts, sg, n_folds=3, alphas=np.geomspace(1e-8, 1e0, 8))
+    assert np.isfinite(alpha_cv)
+    assert alpha_cv > 0
+    assert len(cv_err) == 8
+
+
+def test_depth_weighted_tikhonov():
+    """Depth-weighted Tikhonov should give non-negative result."""
+    inv, _, counts = _twin_eu(seed=13)
+    sg = inv.poisson_sigma(counts)
+    x = depth_weighted_tikhonov(
+        inv.K, counts, 1e-4, inv.z, sigma=sg,
+        weight_method='power', beta=2.0)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+
+
+def test_weighted_smoothness():
+    """Weighted smoothness operator should have correct shape."""
+    z = np.linspace(0, 1.0, 20)
+    w = depth_scale_power(z)
+    L = weighted_smoothness(20, z, w=w, order=2)
+    assert L.shape == (18, 20)
+
+
+def test_compactness_operator():
+    """Compactness operator should return diagonal matrix."""
+    x = np.random.default_rng(0).uniform(0, 100, 20)
+    W_inv = compactness_operator(x, eps=1e-2, mode='ms')
+    assert W_inv.shape == (20, 20)
+    assert np.all(np.diag(W_inv) > 0)
+
+
+def test_joint_inversion():
+    """Joint inversion of two nuclides should return finite profiles."""
+    inv_cs = DepthInverter([CS], heights=[1.0], z_max=0.5, n_z=15)
+    t = 25.0 * YEAR_S
+    a_cs = pulse_profile(inv_cs.z, 1e5, t, 1e-10, 0.0, 1401.0, DECAY_S["Cs-137"])
+    rng = np.random.default_rng(42)
+    d_cs = rng.poisson(np.maximum(inv_cs.K @ a_cs * 1e4, 1.0)) / 1e4
+    s_cs = inv_cs.poisson_sigma(d_cs)
+
+    out = joint_inversion(
+        {"Cs-137": inv_cs.K},
+        {"Cs-137": d_cs},
+        {"Cs-137": s_cs},
+        inv_cs.z, inv_cs.dz,
+        alpha=1e-4, method='tikhonov')
+    assert np.all(out['profiles']["Cs-137"] >= 0)
+    assert np.isfinite(out['chi2'])

@@ -1,4 +1,6 @@
-"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy.
+import os
+
+content = r'''"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy.
 
 All operate in the weighted space (A = K/sigma, b = d/sigma).
 
@@ -277,3 +279,9 @@ def lcurve_corner_iter(hist_residual, hist_solution_norm):
             (lr[j], ls[j]),
             (lr[j + 1], ls[j + 1]))
     return int(np.argmax(kappa)), kappa
+'''
+
+target = '/home/z/my-project/soilactivity/src/soilactivity/depth_inversion/criteria.py'
+with open(target, 'w') as f:
+    f.write(content)
+print(f'Written {len(content)} chars to {target}')

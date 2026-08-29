@@ -732,3 +732,176 @@ def focusing_irls(K, d, alpha, sigma=None, x0=None, nonneg=True,
         "support_history": np.array(support_hist),
         "mode": mode,
     }
+
+
+# =====================================================================
+# Advanced iterative solvers
+# =====================================================================
+
+def cgls_lcurve(K, d, sigma=None, x0=None, nonneg=True,
+                max_iter=500, tol=1e-12):
+    """CGLS with automatic L-curve corner stopping.
+
+    Runs CGLS to max_iter, records residual and solution norm at
+    each iteration, then selects the L-curve corner as the optimal
+    stopping point (analogous to Tikhonov alpha selection).
+
+    This combines the efficiency of iterative methods with the
+    robustness of L-curve parameter selection.
+
+    Parameters
+    ----------
+    K, d, sigma, x0, nonneg, max_iter, tol : as in cgls().
+
+    Returns
+    -------
+    x : np.ndarray (n,)
+    info : dict with 'iterations', 'corner_iter', 'chi2_history',
+          'solution_norm_history'.
+    """
+    from .criteria import lcurve_corner_iter
+
+    A, b = _weighted(K, d, sigma)
+    n = A.shape[1]
+    x = np.zeros(n) if x0 is None else np.asarray(x0, float).copy()
+    if nonneg:
+        x = np.maximum(x, 0.0)
+
+    r = b - A @ x
+    s = A.T @ r
+    p = s.copy()
+    sTs = float(s @ s)
+
+    res_hist = []
+    sol_norm_hist = []
+    x_history = [x.copy()]
+
+    for it in range(max_iter):
+        q = A @ p
+        qTq = float(q @ q)
+        if qTq < 1e-30:
+            break
+        alpha_cg = sTs / qTq
+        x = x + alpha_cg * p
+        if nonneg:
+            x = np.maximum(x, 0.0)
+        r = r - alpha_cg * q
+        s_new = A.T @ r
+        sTs_new = float(s_new @ s_new)
+        beta = sTs_new / max(sTs, 1e-30)
+        p = s_new + beta * p
+        sTs = sTs_new
+
+        res_val = float(r @ r)
+        res_hist.append(res_val)
+        sol_norm_hist.append(float(np.linalg.norm(x)))
+        x_history.append(x.copy())
+
+        if res_val < tol:
+            break
+
+    # Find L-curve corner
+    if len(res_hist) > 2:
+        corner, kappa = lcurve_corner_iter(
+            np.array(res_hist), np.array(sol_norm_hist))
+        corner = min(corner, len(x_history) - 1)
+        x = x_history[corner]
+    else:
+        corner = len(res_hist)
+
+    return x, {
+        "iterations": corner,
+        "corner_iter": corner,
+        "chi2_history": np.array(res_hist),
+        "solution_norm_history": np.array(sol_norm_hist),
+    }
+
+
+def crossval_alpha(K, d, sigma, n_folds=5, alphas=None, L=None,
+                   nonneg=True, seed=0):
+    """K-fold cross-validation for Tikhonov alpha selection.
+
+    Splits data into n_folds, solves on n_folds-1, evaluates
+    misfit on the held-out fold.  Selects alpha minimising
+    the mean held-out misfit.
+
+    This is a noise-level-free alternative to GCV and discrepancy.
+
+    Parameters
+    ----------
+    K : array-like (m, n)
+    d : array-like (m,)
+    sigma : array-like (m,)
+    n_folds : int
+    alphas : array-like or None
+        If None, auto-computed from SVD.
+    L : array-like or None
+        Regularisation operator.
+    nonneg : bool
+    seed : int
+
+    Returns
+    -------
+    alpha_best : float
+    cv_scores : ndarray (len(alphas),)
+    """
+    A, b = _weighted(K, d, sigma)
+    m = len(b)
+    n = A.shape[1]
+    L = np.eye(n) if L is None else L
+
+    if alphas is None:
+        lmax = float(np.linalg.svd(A, compute_uv=False)[0] ** 2)
+        alphas = np.geomspace(lmax * 1e-10, lmax * 1e-1, 32)
+
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(m)
+    folds = np.array_split(idx, n_folds)
+
+    cv_err = np.zeros(len(alphas))
+
+    for fi, test_idx in enumerate(folds):
+        train_idx = np.concatenate([folds[j] for j in range(n_folds) if j != fi])
+        A_tr, b_tr = A[train_idx], b[train_idx]
+        A_te, b_te = A[test_idx], b[test_idx]
+
+        for j, alpha in enumerate(alphas):
+            if nonneg:
+                x = _tikhonov_weighted(A_tr, b_tr, alpha, L=L, nonneg=True)
+            else:
+                M = A_tr.T @ A_tr + alpha * (L.T @ L)
+                x = np.linalg.solve(M, A_tr.T @ b_tr)
+            cv_err[j] += float(np.sum((A_te @ x - b_te) ** 2))
+
+    cv_err /= m
+    return float(alphas[np.argmin(cv_err)]), cv_err
+
+
+def depth_weighted_tikhonov(K, d, alpha, z, sigma=None, L=None, x0=None,
+                              nonneg=True, weight_method='combined', **kw):
+    """Tikhonov with depth-dependent weighting of the model.
+
+    Applies depth weighting w(z) so that the regularisation is:
+        ||W^{1/2} L (x - x0)||^2
+    This counteracts depth-dependent sensitivity decay.
+
+    Parameters
+    ----------
+    K, d, alpha, sigma, L, x0, nonneg : as in tikhonov().
+    z : array-like (n,)
+        Depth grid [m].
+    weight_method : str
+        Passed to compose_weighting in geophysics module.
+    **kw : extra keyword arguments for compose_weighting.
+
+    Returns
+    -------
+    x : ndarray (n,)
+    """
+    from .geophysics import compose_weighting
+
+    A, b = _weighted(K, d, sigma)
+    w = compose_weighting(A, z, method=weight_method, **kw)
+    Lw = np.diag(np.sqrt(w)) @ (L if L is not None else np.eye(len(z)))
+    return _tikhonov_weighted(A, b, alpha, L=Lw, x0=x0, nonneg=nonneg)
+

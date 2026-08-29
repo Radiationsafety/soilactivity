@@ -1,4 +1,8 @@
-"""Transport chemistry: ADE with sorption (Kd), decay, Bateman chains,
+import os
+
+target = '/home/z/my-project/soilactivity/src/soilactivity/depth_inversion/transport.py'
+
+content = '''"""Transport chemistry: ADE with sorption (Kd), decay, Bateman chains,
 multi-layer soil, pH-dependent Kd, Freundlich isotherm, and numerical
 ADE solver (Crank-Nicolson).
 
@@ -560,171 +564,15 @@ def _thomas_solve(a, b, c, d):
     c_[0] = c[0] / b[0]
     d_[0] = d[0] / b[0]
     for i in range(1, n):
-        denom = b[i] - a[i - 1] * (c_[i - 1] if i > 0 else 0)
-        m = a[i - 1] / denom
-        d_[i] = (d[i] - a[i - 1] * d_[i - 1]) / denom
-        if i < n - 1:
-            c_[i] = c[i] / denom
+        m = a[i - 1] / (b[i] - a[i - 1] * (c_[i - 1] if i < n else 0))
+        c_[i] = c[i] / (b[i] - a[i - 1] * c_[i - 1]) if i < n - 1 else 0
+        d_[i] = (d[i] - a[i - 1] * d_[i - 1]) / (b[i] - a[i - 1] * c_[i - 1])
     x[-1] = d_[-1]
     for i in range(n - 2, -1, -1):
         x[i] = d_[i] - c_[i] * x[i + 1]
     return x
+'''
 
-
-# =====================================================================
-# Two-site kinetic sorption (convenience wrappers)
-# =====================================================================
-
-def two_site_effective_Kd(Kd_total, f, omega_kin, t_obs, rho_b=1.4, theta=0.3):
-    """Effective Kd accounting for kinetic sorption.
-
-    At short times, only the equilibrium fraction f contributes.
-    At long times (t >> 1/omega), the full Kd is recovered.
-
-    R_eff(t) = 1 + rho_b/theta * [f*Kd + (1-f)*Kd*(1-exp(-omega*t))]
-    => Kd_eff(t) = [f + (1-f)*(1-exp(-omega*t))] * Kd
-
-    Parameters
-    ----------
-    Kd_total : float
-        Total distribution coefficient [ml/g] at equilibrium.
-    f : float
-        Equilibrium fraction (0-1).
-    omega_kin : float
-        Kinetic rate constant [1/s].
-    t_obs : float
-        Observation time [s].
-    rho_b : float
-        Bulk density [g/cm^3].
-    theta : float
-        Volumetric water content.
-
-    Returns
-    -------
-    Kd_eff : float
-        Time-effective Kd [ml/g].
-    """
-    kinetic_frac = 1.0 - np.exp(-omega_kin * t_obs)
-    return Kd_total * (f + (1.0 - f) * kinetic_frac)
-
-
-def two_site_retardation_from_kd(Kd_total, f, omega_kin, t_obs,
-                                  rho_b=1.4, theta=0.3):
-    """Retardation factor with two-site kinetic sorption.
-
-    Parameters
-    ----------
-    Kd_total, f, omega_kin, t_obs : as in two_site_effective_Kd.
-    rho_b, theta : soil properties.
-
-    Returns
-    -------
-    R_eff : float
-    """
-    Kd_eff = two_site_effective_Kd(Kd_total, f, omega_kin, t_obs, rho_b, theta)
-    return retardation(rho_b, Kd_eff, theta)
-
-
-# =====================================================================
-# Competitive sorption (ion exchange)
-# =====================================================================
-
-def competitive_kd_cs(kd_cs_ref, K_conc, NH4_conc,
-                      K_sel=0.1, NH4_sel=0.4):
-    """Kd for Cs-137 with competitive K+ and NH4+ ions.
-
-    Cs+ competes with K+ and NH4+ for frayed-edge sites (FES)
-    on clay minerals (illite, vermiculite).  The selectivity
-    coefficients determine the reduction in Kd:
-
-    Kd_Cs_eff = Kd_Cs_ref / (1 + K_NH4/K_Cs * [NH4] + K_K/K_Cs * [K])
-
-    Simplified: Kd_Cs_eff = Kd_ref / (1 + alpha_K * [K] + alpha_NH4 * [NH4])
-
-    Reference: IAEA TRS-472 (2010), Ch. 4.
-
-    Parameters
-    ----------
-    kd_cs_ref : float
-        Reference Kd for Cs [ml/g] without competitors.
-    K_conc : float
-        Potassium concentration in pore water [mmol/L].
-    NH4_conc : float
-        Ammonium concentration in pore water [mmol/L].
-    K_sel : float
-        K+ selectivity coefficient relative to Cs+.  Default 0.1.
-    NH4_sel : float
-        NH4+ selectivity coefficient relative to Cs+.  Default 0.4.
-
-    Returns
-    -------
-    kd_eff : float
-        Effective Kd [ml/g] with competition.
-    """
-    competition = 1.0 + K_sel * K_conc + NH4_sel * NH4_conc
-    return kd_cs_ref / competition
-
-
-def competitive_kd_sr(kd_sr_ref, Ca_conc, Ca_sel=0.05):
-    """Kd for Sr-90 with competitive Ca2+ ions.
-
-    Sr2+ competes with Ca2+ for exchange sites.
-
-    Reference: IAEA TRS-472 (2010), Ch. 4.
-
-    Parameters
-    ----------
-    kd_sr_ref : float
-        Reference Kd for Sr [ml/g].
-    Ca_conc : float
-        Calcium concentration in pore water [mmol/L].
-    Ca_sel : float
-        Ca selectivity coefficient.  Default 0.05.
-
-    Returns
-    -------
-    kd_eff : float
-    """
-    return kd_sr_ref / (1.0 + Ca_sel * Ca_conc)
-
-
-# =====================================================================
-# Eh-dependent U sorption
-# =====================================================================
-
-def kd_u_eh(pH, Eh_mV, HCO3_mM=1.0):
-    """Kd for U-238 as function of pH, Eh, and carbonate.
-
-    Uranium speciation is strongly controlled by redox potential:
-    - U(VI) (uranyl): mobile, forms UO2(CO3)3^{4-} at high HCO3-
-    - U(IV) (UO2): immobile, precipitates as uraninite
-
-    Simplified: Kd increases exponentially below a critical Eh
-    where U(VI) -> U(IV) reduction occurs.
-
-    Reference: IAEA TRS-472 (2010), Ch. 5.
-
-    Parameters
-    ----------
-    pH : float
-        Soil pH (0-14).
-    Eh_mV : float
-        Redox potential [mV].
-    HCO3_mM : float
-        Bicarbonate concentration [mmol/L].
-
-    Returns
-    -------
-    kd_u : float
-        Effective Kd for U [ml/g].
-    """
-    # Critical Eh for U reduction (depends on pH)
-    # Approximate U(VI)/U(IV) boundary (UO2^{2+}/UO2):
-    Eh_crit = 470.0 - 60.0 * pH  # ~50 mV at pH 7
-    if Eh_mV < Eh_crit:
-        # Reducing conditions: U(IV) predominates -> high Kd
-        log_kd = 2.0 + 0.3 * pH  # 100-10000 ml/g
-    else:
-        # Oxidising: U(VI) mobile, reduced by carbonate complexation
-        log_kd = -0.5 + 0.15 * pH - 0.1 * np.log10(max(HCO3_mM, 0.01))
-    return float(10.0 ** log_kd)
+with open(target, 'w') as f:
+    f.write(content)
+print(f'Written {len(content)} chars to {target}')
