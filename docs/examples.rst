@@ -42,6 +42,19 @@ Real Data Examples
     higher-energy kerma constant (137.0 aGy m²/s/Bq) and corresponding
     dose-rate kernel.
 
+**example06 — Interpolation Method Selection & Measurement Sensitivity**
+    Explores the ``spatial_interpolation`` module with three demonstrations:
+    (1) automated cross-validation comparison of 6 interpolation backends
+    (RBF TPS, linear Delaunay, IDW, Barnes, Cressman, GP RBF) on synthetic
+    ADER data with three hot spots; (2) leave-one-out sensitivity analysis
+    identifying which measurement points most influence the interpolated
+    field, with influence maps and critical-point detection; (3) interpolation
+    of sparse reconstruction results (8 points → 50×50 grid) using
+    ``SparseResultInterpolator`` with GP uncertainty and confidence masking.
+    The sensitivity analysis approach is inspired by ``bssunfold``'s
+    ``unfold_interpret`` and the ``pyoptexplain`` perturbation-based
+    explanation pattern.
+
 66 bssunfold Methods
 ---------------------
 
@@ -73,6 +86,10 @@ The ``bssunfold_methods/`` subdirectory contains the 66-method benchmark suite.
 For the core examples (00–05), install the package with::
 
     pip install numpy scipy matplotlib
+
+Example 06 additionally requires::
+
+    pip install scikit-learn  # optional: pykrige for Kriging support
 
 The bssunfold method notebooks additionally require::
 

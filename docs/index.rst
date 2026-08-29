@@ -1,13 +1,15 @@
 SoilActivity — Radionuclide Activity Reconstruction and Dosimetry
 ====================================================================
 
-**Version:** 0.4.0
+**Version:** 0.5.0
 
 SoilActivity is a Python package for reconstructing spatial distributions of
 radionuclide activity in soil from in-situ gamma spectrometry measurements. It
 provides tools for 3D volumetric unfolding, 2D Fredholm equation-based SAD
 (surface activity distribution) reconstruction, dosimetry calculations,
-photon attenuation and buildup factor modelling, and spatial statistics.
+photon attenuation and buildup factor modelling, spatial interpolation with
+14 backends and automated method selection, measurement sensitivity analysis,
+and spatial statistics.
 
 .. toctree::
    :maxdepth: 2
@@ -36,6 +38,12 @@ Features
   elements, compounds, and mixtures.
 - **Buildup factors** — ANS-6.4.3 exposure buildup factors with Geometric
   Progression parametrisation.
+- **Spatial interpolation** — 14 backends (RBF, Delaunay, IDW, Barnes, Cressman, Kriging,
+  Gaussian Process) with automated cross-validation method selection, uncertainty
+  quantification, and sparse-result interpolation.
+- **Measurement sensitivity analysis** — Leave-one-out and perturbation-based
+  analysis of which measurement points most influence the interpolated field
+  (analogous to ``bssunfold.unfold_interpret`` and the ``pyoptexplain`` pattern).
 - **Spatial statistics** — Lorenz curve analysis, Gini coefficient, and
   information correlation coefficient for characterising activity heterogeneity.
 - **66 unfolding methods** — Comprehensive benchmark suite of direct, iterative,

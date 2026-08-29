@@ -2,29 +2,81 @@
 
 ## [0.5.0] - 2026-08-29
 ### Added
-- **`soilactivity.spatial_interpolation`** — новый модуль пространственной
-  интерполяции с 14 методами и анализом чувствительности:
-  - `Interpolator2D` — единый интерфейс: RBF (4 ядра), Delaunay (3 метода),
-    IDW, Barnes, Cressman, Kriging (pykrige), GP (scikit-learn, 3 ядра)
-  - `InterpolationAutoSelector` — автоподбор лучшего метода через
-    кросс-валидацию (RMSE, MAE, R2, время)
-  - `MeasurementSensitivityAnalyzer` — анализ влияния точек измерений
-    на результат (leave-one-out, perturbation, карта влияния, критические
-    точки). Аналог `unfold_interpret` из bssunfold + pyoptexplain.
-  - `SparseResultInterpolator` — интерполяция разреженных результатов
-    реконструкции на плотную сетку с оценкой неопределённости
-  - `idw_interpolate()`, `barnes_interpolate()`, `cressman_interpolate()`
-  - `AVAILABLE_METHODS` — справочник 14 методов с описаниями
+- **`soilactivity.spatial_interpolation`** — модуль пространственной
+  интерполяции с 14 методами, автоподбором и анализом чувствительности.
+
+  **`Interpolator2D`** — единый интерфейс для 14 backends:
+  - RBF (scipy): `rbf_tps` (thin-plate spline, default), `rbf_linear`,
+    `rbf_cubic`, `rbf_gaussian`
+  - Delaunay (scipy griddata): `nearest`, `linear_delaunay`,
+    `cubic_delaunay` (Clough-Tocher C1)
+  - IDW (inverse distance weighting, k=12 nearest, power=2)
+  - Метеорологические: `barnes` (последовательные поправки, kappa/
+    iterations), `cressman` (радиус влияния)
+  - Геостатистика: `kriging` (ordinary kriging, pykrige)
+  - Gaussian Process (scikit-learn): `gp_rbf`, `gp_matern32`,
+    `gp_matern52`
+  - Методы с оценкой неопределённости: `gp_*` и `kriging`
+    (`.uncertainty()` возвращает std)
+
+  **`InterpolationAutoSelector`** — автоматический подбор лучшего метода:
+  - k-fold CV (N >= 30) или leave-one-out (N < 30)
+  - Метрики: RMSE, MAE, R², время
+  - Критерий отбора: минимальный RMSE, тай-брейк — максимальный R²
+  - `.select()` — лучший метод, `.get_ranking()` — все методы,
+    `.plot_comparison()` — столбчатая диаграмма,
+    `.get_recommendation()` — текстовая рекомендация
+
+  **`MeasurementSensitivityAnalyzer`** — анализ влияния точек измерений
+  (аналог `unfold_interpret` из bssunfold + pyoptexplain):
+  - `sensitivity_leave_one_out()` — удаление каждой точки,
+    пересчёт поля, `max_influence`, `mean_influence`,
+    `influence_area_km2`
+  - `sensitivity_perturbation(delta_frac)` — возмущение z[i],
+    измерение изменения интерполяционного поля
+  - `ranking()` — сортировка по влиянию (descending)
+  - `critical_points(percentile)` — точки с влиянием выше порога
+  - `influence_map(xi, yi)` — суммарная карта влияния
+  - `plot_influence(xi, yi)` — heatmap + точки измерений
+
+  **`SparseResultInterpolator`** — интерполяция разреженных результатов
+  реконструкции на плотную сетку:
+  - `.fit_sparse(points, values, uncertainty)` — обучить на N точках
+  - `.interpolate_to_grid(xmin, xmax, ymin, ymax, nx, ny)` — плотная сетка
+  - Возвращает `SparseResult`: `interpolated`, `uncertainty`,
+    `confidence_mask`, `method_used`, `n_input_points`, `coverage`
+  - Если GP + uncertainty → передаётся как noise prior (alpha)
+  - `confidence_mask`: relative std < `uncertainty_threshold`
+
+  **Standalone-функции:**
+  - `idw_interpolate(x, y, z, xi, yi, power, max_neighbors)`
+  - `barnes_interpolate(x, y, z, xi, yi, kappa, iterations)`
+  - `cressman_interpolate(x, y, z, xi, yi, radius)`
+  - `AVAILABLE_METHODS` — справочник 14 методов
 
 - **`examples/example06_interpretation.ipynb`** (15 ячеек):
-  - Сравнение 6 методов интерполяции МАЭД (автоподбор + визуализация)
-  - Анализ чувствительности: какие точки измерений больше всего
-    влияют на результат реконструкции
-  - Интерполяция разреженных результатов
+  - Каталог 14 методов (`AVAILABLE_METHODS`)
+  - Синтетические данные МАЭД: 3 горячих пятна + фон, 100 точек,
+    lognormal noise
+  - Сравнение 6 методов интерполяции (RBF TPS, linear Delaunay,
+    IDW, Barnes, Cressman, GP RBF) через `InterpolationAutoSelector`
+  - Визуализация: 2×3 subplot сетка карт интерполяции
+  - Столбчатая диаграмма RMSE + текстовая рекомендация
+  - Leave-one-out анализ чувствительности: `ranking()`,
+    `critical_points(90)`
+  - Карта влияния (`influence_map`, `plot_influence`)
+  - Интерполяция разреженных результатов (8 точек → 50×50 сетка)
+    через `SparseResultInterpolator` с confidence mask
 
 ### Changed
-- `soilactivity.__init__` экспортирует все классы из `spatial_interpolation`
+- `soilactivity.__init__` экспортирует `Interpolator2D`,
+  `InterpolationAutoSelector`, `SparseResultInterpolator`,
+  `MeasurementSensitivityAnalyzer`, `idw_interpolate`,
+  `barnes_interpolate`, `cressman_interpolate`, `AVAILABLE_METHODS`
 - Версия → 0.5.0
+- Обновлён README.md: полный раздел пространственной интерполяции
+  с таблицей 14 методов, примерами для каждого класса, таблицей зависимостей
+- Обновлены Sphinx docs: methods.rst, api.rst, examples.rst, index.rst
 
 ## [0.4.0] - 2026-08-29
 ### Added

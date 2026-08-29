@@ -167,3 +167,160 @@ useful for comparing measured vs. reconstructed activity maps.
 **Entropy** — :func:`~soilactivity.correlation.entropy` computes the Shannon
 entropy of a discrete probability distribution, used as a regularisation
 penalty in some Bayesian unfolding methods.
+
+Spatial Interpolation
+--------------------
+
+The ``soilactivity.spatial_interpolation`` module provides a unified framework
+for 2-D spatial interpolation of environmental measurements (dose rates, activity
+densities, etc.) with 14 backends, automated method selection, and sensitivity
+analysis.
+
+Interpolator2D
+~~~~~~~~~~~~~~
+
+:class:`~soilactivity.spatial_interpolation.Interpolator2D` wraps multiple
+interpolation backends behind a single ``fit`` / ``predict`` / ``predict_grid``
+API. The ``method`` parameter selects one of 14 backends:
+
+**RBF (scipy)** — Radial basis function interpolation. Four kernel variants
+are available:
+
+- ``rbf_tps`` — Thin-plate spline (default). Smooth, globally supported,
+  suitable for evenly distributed data.
+- ``rbf_linear`` — Linear RBF. Less smooth than TPS, faster to evaluate.
+- ``rbf_cubic`` — Cubic RBF. Produces C1-continuous surfaces.
+- ``rbf_gaussian`` — Gaussian RBF. Locally supported (controlled by
+  ``smoothing``), suitable for dense data.
+
+**Delaunay (scipy griddata)** — Triangulation-based interpolation:
+
+- ``nearest`` — Nearest-neighbour lookup. Fast, no smoothing, produces
+  discontinuous surfaces. Useful for classification maps.
+- ``linear_delaunay`` — Piecewise linear interpolation on the Delaunay
+  triangulation. Fast and robust.
+- ``cubic_delaunay`` — Clough-Tocher cubic interpolation (C1-continuous).
+  Smoother than linear but slower; may overshoot near sharp gradients.
+
+**Deterministic**
+
+- ``idw`` — Inverse Distance Weighting. Uses the 12 nearest neighbours
+  with ``w_i = 1/d_i^2``. Simple, fast, and controllable via ``power`` and
+  ``max_neighbors`` parameters. Implemented via ``scipy.spatial.cKDTree``.
+
+**Meteorological schemes**
+
+- ``barnes`` — Barnes successive-correction interpolation. Applies
+  Gaussian-weighted averaging in multiple passes with decreasing scale
+  length (``kappa``). Commonly used in meteorology for objective analysis.
+- ``cressman`` — Cressman analysis scheme. Weight function
+  ``w = (R² - r²)/(R² + r²)`` inside a fixed influence ``radius``. Produces
+  smoother fields than nearest-neighbour.
+
+**Geostatistical**
+
+- ``kriging`` — Ordinary Kriging via ``pykrige``. Fits a variogram model
+  to the data and provides Best Linear Unbiased Prediction (BLUP) with
+  built-in prediction variance (accessible via ``.uncertainty()``).
+
+**Gaussian Process (scikit-learn)**
+
+- ``gp_rbf`` — Gaussian Process with RBF (squared exponential) kernel.
+  Provides smooth interpolation with uncertainty quantification.
+- ``gp_matern32`` — Gaussian Process with Matern 3/2 kernel. Less smooth
+  than RBF, suitable for data with moderate roughness.
+- ``gp_matern52`` — Gaussian Process with Matern 5/2 kernel. Once
+  differentiable, a good default for environmental data.
+
+All GP methods optimise kernel hyperparameters via maximum likelihood
+with 5 random restarts (configurable via ``n_restarts_optimizer``). If
+``smoothing > 0``, a WhiteKernel noise term is added. Prediction standard
+deviation is available via ``.uncertainty()``.
+
+**Uncertainty quantification** — The ``.uncertainty(xi, yi)`` method returns
+prediction standard deviations for ``gp_*`` and ``kriging`` backends, and
+``None`` for all others. This enables confidence-interval mapping and
+masking of unreliable extrapolation regions.
+
+InterpolationAutoSelector
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~soilactivity.spatial_interpolation.InterpolationAutoSelector`
+automatically selects the best interpolation method from a candidate list
+using cross-validation:
+
+- For N >= 30 data points: k-fold CV (default k=5).
+- For N < 30: leave-one-out CV.
+- Metrics computed per fold: RMSE, MAE, R², wall-clock time.
+- Selection criterion: lowest mean RMSE; ties broken by highest R².
+
+The ``.select()`` method returns a dict with ``best_method``, ``best_score``,
+and the full ``results`` list. The ``.get_ranking()`` method returns all
+methods sorted by RMSE. The ``.plot_comparison()`` method produces a
+horizontal bar chart of cross-validated RMSE values. The
+``.get_recommendation()`` method returns a human-readable summary string.
+
+Methods whose dependencies are missing (e.g. ``pykrige`` for ``kriging``)
+are gracefully skipped with an error note, allowing mixed candidate lists
+without install-time failures.
+
+MeasurementSensitivityAnalyzer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~soilactivity.spatial_interpolation.MeasurementSensitivityAnalyzer`
+quantifies how much each individual measurement point influences the
+interpolated field. This is the spatial analog of ``bssunfold``'s
+``unfold_interpret`` module and follows the ``pyoptexplain`` pattern of
+perturbation-based explanation.
+
+**Leave-one-out analysis** (``sensitivity_leave_one_out``) removes each
+data point in turn, rebuilds the interpolation, and measures the change
+at all evaluation grid locations. For each point *i*, the following
+metrics are computed:
+
+- ``max_influence`` — maximum absolute change across the evaluation grid.
+- ``mean_influence`` — mean absolute change.
+- ``influence_area_km2`` — area (in km²) where the change exceeds 5 % of
+  the maximum change for that point.
+
+**Perturbation analysis** (``sensitivity_perturbation``) perturbs each
+point's z-value by ``delta_frac * max(|z[i]|, std(z))`` and measures the
+resulting field change. This is useful when data points carry
+measurement uncertainty and one wants to know how sensitive the
+interpolated map is to small errors at each location.
+
+The ``ranking()`` method returns all points sorted by ``max_influence``
+descending. The ``critical_points(percentile)`` method filters to points
+above a given influence percentile (default 90 %). The ``influence_map(xi, yi)``
+method produces a 2-D grid showing the total influence at each location,
+and ``plot_influence(xi, yi)`` renders it as a heatmap with measurement
+points overlaid.
+
+SparseResultInterpolator
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~soilactivity.spatial_interpolation.SparseResultInterpolator`
+addresses the common scenario where a Fredholm or volumetric reconstruction
+yields results at only a few spatial locations (e.g. individual boreholes
+or detector positions). It interpolates these sparse results onto a dense
+regular grid with uncertainty quantification.
+
+The ``.fit_sparse(points, values, uncertainty)`` method accepts an
+(N, 2) array of coordinates, N values, and optional per-point
+uncertainties. If the method is a GP and uncertainties are provided,
+they are used as the noise prior (``alpha`` parameter).
+
+The ``.interpolate_to_grid(xmin, xmax, ymin, ymax, nx, ny)`` method
+returns a :class:`~soilactivity.spatial_interpolation.SparseResult`
+dataclass containing:
+
+- ``interpolated`` — (ny, nx) array of interpolated values.
+- ``uncertainty`` — (ny, nx) array of prediction std, or ``None``.
+- ``confidence_mask`` — boolean mask where ``std / max(|z|) < threshold``.
+- ``coverage`` — fraction of grid cells passing the confidence threshold.
+- ``method_used`` — name of the interpolation method.
+- ``n_input_points`` — number of sparse input points.
+
+Gaussian Process methods (``gp_rbf``, ``gp_matern52``) are recommended for
+this use case because they provide built-in uncertainty estimates that
+drive the confidence mask.
