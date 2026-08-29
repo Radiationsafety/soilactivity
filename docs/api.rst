@@ -71,10 +71,17 @@ Visibility
 .. automodule:: soilactivity.visibility
    :members: compute_visibility_matrix, visibility_radius_mask
 
-Interpolation
--------------
+Interpolation (legacy)
+------------------
 
 .. automodule:: soilactivity.interpolation
+
+Spatial Interpolation
+--------------------
+
+.. automodule:: soilactivity.spatial_interpolation
+   :members:
+   :show-inheritance:
 
 Sensitivity
 -----------

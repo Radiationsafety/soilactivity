@@ -146,25 +146,141 @@ LMfit, SciPy, Mystic, Genetic, CPLEX, QUBO, ODL, zfit и др.
 |---|---|
 | `example06_interpretation.ipynb` | Автоподбор интерполяции, анализ влияния точек, разреженные результаты |
 
-## Пространственная интерполяция
+## Пространственная интерполяция и анализ чувствительности
 
-Модуль `soilactivity.spatial_interpolation` — 14 методов + автоподбор + анализ чувствительности:
+Модуль `soilactivity.spatial_interpolation` обеспечивает единый интерфейс для
+14 методов 2D-интерполяции, автоматический подбор лучшего метода через
+кросс-валидацию, анализ влияния точек измерений на результат и интерполяцию
+разреженных реконструкций с оценкой неопределённости.
+
+### Доступные методы
+
+| Метод | Класс | Описание | Зависимость |
+|---|---|---|---|
+| `rbf_tps` | RBF | Тонкая пластинка (smooth, по умолчанию) | scipy |
+| `rbf_linear` | RBF | Линейное RBF | scipy |
+| `rbf_cubic` | RBF | Кубическое RBF | scipy |
+| `rbf_gaussian` | RBF | Гауссово RBF | scipy |
+| `nearest` | Delaunay | Ближайший сосед (быстро, без сглаживания) | scipy |
+| `linear_delaunay` | Delaunay | Линейная триангуляция | scipy |
+| `cubic_delaunay` | Delaunay | Clough-Tocher кубическое (C1 гладкое) | scipy |
+| `idw` | Детермин. | Обратные расстояния (power=2, k=12) | scipy |
+| `barnes` | Метео | Последовательные поправки Барнса | numpy |
+| `cressman` | Метео | Схема Крессмана | numpy |
+| `kriging` | Геостат. | Обычный кригинг | pykrige |
+| `gp_rbf` | GP | Гауссовский процесс, RBF ядро | scikit-learn |
+| `gp_matern32` | GP | Гауссовский процесс, Matern 3/2 | scikit-learn |
+| `gp_matern52` | GP | Гауссовский процесс, Matern 5/2 | scikit-learn |
+
+### Interpolator2D — единый интерфейс
 
 ```python
-from soilactivity import Interpolator2D, InterpolationAutoSelector, MeasurementSensitivityAnalyzer
+from soilactivity import Interpolator2D
 
-# Автоподбор лучшего метода
-selector = InterpolationAutoSelector(candidates=['rbf_tps', 'idw', 'barnes', 'cressman'])
+interp = Interpolator2D(method='rbf_tps', smoothing=0.1)
+interp.fit(x, y, z)                     # обучить на точках измерений
+zi = interp.predict(xi, yi)              # интерполяция в произвольные точки
+Z, XI, YI = interp.predict_grid(xi, yi)  # интерполяция на регулярную сетку
+std = interp.uncertainty(XI, YI)         # неопределённость (GP, Kriging)
+print(interp.get_info())                 # справка о методе
+```
+
+### InterpolationAutoSelector — автоматический подбор
+
+```python
+from soilactivity import InterpolationAutoSelector
+
+selector = InterpolationAutoSelector(
+    candidates=['rbf_tps', 'linear_delaunay', 'idw', 'barnes', 'cressman'],
+    cv_folds=5,
+    metrics=['rmse', 'mae', 'r2'],
+)
 selector.fit(x, y, z)
-result = selector.select()
-print(result['best_method'], result['best_score'])
+result = selector.select()           # {'best_method': 'rbf_tps', 'best_score': 0.042, ...}
+print(selector.get_recommendation())  # текстовая рекомендация
+ranking = selector.get_ranking()     # все методы отсортированы по RMSE
+fig, ax = selector.plot_comparison() # столбчатая диаграмма RMSE
+```
 
-# Анализ влияния точек (аналог bssunfold unfold_interpret)
+Выбор: минимальный RMSE, при равенстве — максимальный R². Для N < 30
+автоматически используется leave-one-out вместо k-fold.
+
+### MeasurementSensitivityAnalyzer — анализ влияния точек
+
+Аналог `bssunfold.unfold_interpret` и подхода `pyoptexplain`.
+Определяет, какие точки измерений больше всего влияют на результат
+интерполяции (и, следовательно, на реконструкцию активности).
+
+```python
+from soilactivity import MeasurementSensitivityAnalyzer
+
 analyzer = MeasurementSensitivityAnalyzer()
 analyzer.fit(x, y, z, method='rbf_tps')
-ranking = analyzer.ranking()  # какие точки больше влияют
-critical = analyzer.critical_points(90)  # top-10% критических
+
+# Leave-one-out: удалить каждую точку, пересчитать поле
+loo = analyzer.sensitivity_leave_one_out()
+
+# Perturbation: Perturb z[i] на delta_frac, измерить изменение поля
+pert = analyzer.sensitivity_perturbation(delta_frac=0.1)
+
+# Результаты
+ranking = analyzer.ranking()                  # сортировка по max_influence
+critical = analyzer.critical_points(90)         # top-10% критических точек
+
+# Карта суммарного влияния
+influence = analyzer.influence_map(xi, yi)
+fig, ax = analyzer.plot_influence(xi, yi)     # heatmap + точки измерений
 ```
+
+Каждая точка в результате содержит:
+`point_index`, `x`, `y`, `z`, `max_influence`, `mean_influence`,
+`influence_area_km2`.
+
+### SparseResultInterpolator — интерполяция разреженных результатов
+
+Когда Фредголm-реконструкция даёт результат в нескольких точках,
+этот класс интерполирует их на плотную сетку с оценкой неопределённости.
+
+```python
+from soilactivity import SparseResultInterpolator
+
+spi = SparseResultInterpolator(method='gp_rbf', uncertainty_threshold=0.3)
+spi.fit_sparse(reconstructed_points, values, uncertainty=unc)
+result = spi.interpolate_to_grid(xmin, xmax, ymin, ymax, nx=50, ny=50)
+
+print(result.method_used)       # 'gp_rbf'
+print(result.n_input_points)    # 8
+print(result.coverage)          # 0.72 — доля ячеек с confidence
+print(result.interpolated.shape)  # (50, 50)
+print(result.uncertainty.shape)    # (50, 50) или None
+print(result.confidence_mask.shape)  # (50, 50) bool
+```
+
+Рекомендуется использовать GP-методы (`gp_rbf`, `gp_matern52`) для
+автоматической оценки неопределённости. Если предоставлены `uncertainty`,
+они используются как prior noise в GP.
+
+### Standalone-функции
+
+```python
+from soilactivity import idw_interpolate, barnes_interpolate, cressman_interpolate
+
+zi = idw_interpolate(x, y, z, xi, yi, power=2, max_neighbors=12)
+zi = barnes_interpolate(x, y, z, xi, yi, kappa=5.0, iterations=2)
+zi = cressman_interpolate(x, y, z, xi, yi, radius=5.0)
+```
+
+### Зависимости
+
+| Пакет | Обязательный | Для методов |
+|---|---|---|
+| numpy | Да | все |
+| scipy | Да | RBF, Delaunay, IDW |
+| scikit-learn | Нет | `gp_rbf`, `gp_matern32`, `gp_matern52` |
+| pykrige | Нет | `kriging` |
+| matplotlib | Нет | графики (`plot_influence`, `plot_comparison`) |
+
+## Пространственная статистика
 
 ```python
 from soilactivity import lorenz_curve, lorenz_gini_coefficient
