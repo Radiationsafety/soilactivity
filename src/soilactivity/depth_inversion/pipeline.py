@@ -1,23 +1,22 @@
-/**
- * DepthInverter: end-to-end pipeline from peak count rates to a(z) + 1-sigma.
- *
- * Supports:
- *  - Non-parametric: Tikhonov, TV/ADMM, FISTA (L1), focusing (MGS),
- *    CGLS, Landweber, Cimmino, TSVD — with automatic alpha selection.
- *  - Parametric: transport-chemistry-informed (pulse/exp profiles).
- *  - Bayesian: EKI ensemble uncertainty, Laplace MAP.
- *  - Ensemble multi-method with AIC/BIC model selection.
- *
- * References
- * ----------
- * - Beck & de Planque (1968) HASL-234.
- * - Zombori et al. (1992) IAEA-314.
- * - Tyler (2008) J. Environ. Radioact. 99, 143-161.
- * - IAEA TRS-472 (2010) — Kd database.
- * - Portniaguine & Zhdanov (1999) Geophysics 64(3):874.
- * - Vatankhah et al. (2018) GJI 213(1):695.
- * - Hasan et al. (2022, 2023) J. Environ. Radioact.
- */
+"""DepthInverter: end-to-end pipeline from peak count rates to a(z) + 1-sigma.
+
+Supports:
+ - Non-parametric: Tikhonov, TV/ADMM, FISTA (L1), focusing (MGS),
+   CGLS, Landweber, Cimmino, TSVD -- with automatic alpha selection.
+ - Parametric: transport-chemistry-informed (pulse/exp profiles).
+ - Bayesian: EKI ensemble uncertainty, Laplace MAP.
+ - Ensemble multi-method with AIC/BIC model selection.
+
+References
+----------
+- Beck & de Planque (1968) HASL-234.
+- Zombori et al. (1992) IAEA-314.
+- Tyler (2008) J. Environ. Radioact. 99, 143-161.
+- IAEA TRS-472 (2010) -- Kd database.
+- Portniaguine & Zhdanov (1999) Geophysics 64(3):874.
+- Vatankhah et al. (2018) GJI 213(1):695.
+- Hasan et al. (2022, 2023) J. Environ. Radioact.
+"""
 from __future__ import division, print_function, absolute_import
 
 from dataclasses import dataclass, field

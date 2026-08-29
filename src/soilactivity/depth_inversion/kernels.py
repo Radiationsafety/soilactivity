@@ -23,7 +23,8 @@ References
 - Zombori et al. (1992) IAEA-314.
 - Tyler (2008) J. Environ. Radioact. 99, 143–161.
 - Hasan et al. (2022) J. Environ. Radioact. 251:106877.
-"""from __future__ import division, print_function, absolute_import
+"""
+from __future__ import division, print_function, absolute_import
 
 import numpy as np
 from scipy.special import exp1

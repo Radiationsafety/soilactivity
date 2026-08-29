@@ -1,7 +1,35 @@
 """Transport chemistry: ADE with sorption (Kd), decay, Bateman chains,
 multi-layer soil, pH-dependent Kd, Freundlich isotherm, and numerical
-ADE solver (Crank-Nicolson).R_j * dC_j/dt = d/dz(D_j * dC_j/dz) - v_j * dC_j/dz - lambda_j * R_j * C_j                   + lambda_{j-1} * b_{j-1} * R_{j-1} * C_{j-1}R = 1 + rho_b * Kd / theta.Kd depends on pH/Eh, mineralogy, competitors (Cs<->K+/NH4+,
-Sr<->Ca2+, U<->carbonates/Eh, Pu<->colloids).References----------    IAEA TRS-472 (2010) — radiological assessment.    Sheppard & Thibault (1990) — Kd compilation.    van Genuchten (1981) — analytical solutions for ADE.    Millington & Quirk (1961) — gas diffusivity in porous media.    Bateman (1910) — radioactive decay chains.    Kurikami et al. (2017) — kinetic sorption coupling, J. Env. Radioact.    Roushdy (2025) — sorption performance and migration, Environ. Earth Sci."""from __future__ import division, print_function, absolute_importimport numpy as npfrom scipy.linalg import expm_trapz = getattr(np, "trapezoid", None) or np.trapz# Kd ranges, ml/g (IAEA TRS-472, 2010; Sheppard & Thibault, 1990)KD_DB = {
+ADE solver (Crank-Nicolson).
+
+    R_j * dC_j/dt = d/dz(D_j * dC_j/dz) - v_j * dC_j/dz
+                      - lambda_j * R_j * C_j
+                      + lambda_{j-1} * b_{j-1} * R_{j-1} * C_{j-1}
+
+    R = 1 + rho_b * Kd / theta.
+
+Kd depends on pH/Eh, mineralogy, competitors (Cs<->K+/NH4+,
+Sr<->Ca2+, U<->carbonates/Eh, Pu<->colloids).
+
+References
+----------
+    IAEA TRS-472 (2010) — radiological assessment.
+    Sheppard & Thibault (1990) — Kd compilation.
+    van Genuchten (1981) — analytical solutions for ADE.
+    Millington & Quirk (1961) — gas diffusivity in porous media.
+    Bateman (1910) — radioactive decay chains.
+    Kurikami et al. (2017) — kinetic sorption coupling, J. Env. Radioact.
+    Roushdy (2025) — sorption performance and migration, Environ. Earth Sci.
+"""
+from __future__ import division, print_function, absolute_import
+
+import numpy as np
+from scipy.linalg import expm
+
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
+# Kd ranges, ml/g (IAEA TRS-472, 2010; Sheppard & Thibault, 1990)
+KD_DB = {
     "Cs-137": (100.0, 3000.0),
     "Sr-90": (10.0, 500.0),
     "Co-60": (50.0, 1000.0),
@@ -14,18 +42,27 @@ Sr<->Ca2+, U<->carbonates/Eh, Pu<->colloids).References----------    IAEA TRS-47
     "I-131": (0.1, 10.0),
     "Tc-99": (0.01, 1.0),
     "Se-79": (1.0, 100.0),
-}# pH-dependent Kd model parameters (empirical, fitted to IAEA data)# log10(Kd) = a_pH * pH + b_clay * clay_frac + c_oc * OC_frac + d_interceptKD_PH_PARAMS = {
+}
+
+# pH-dependent Kd model parameters (empirical, fitted to IAEA data)
+# log10(Kd) = a_pH * pH + b_clay * clay_frac + c_oc * OC_frac + d_intercept
+KD_PH_PARAMS = {
     "Cs-137": {"a_pH": 0.15, "b_clay": 0.02, "c_oc": 0.01, "d": 1.5},
     "Sr-90":  {"a_pH": 0.08, "b_clay": 0.005, "c_oc": 0.005, "d": 0.5},
     "Co-60":  {"a_pH": 0.10, "b_clay": 0.01, "c_oc": 0.008, "d": 1.0},
     "U-238":  {"a_pH": -0.05, "b_clay": 0.005, "c_oc": 0.01, "d": 0.8},
-}# Freundlich isotherm parameters: S = K_F * C^n_F# K_F [ml/g], n_F [-]
+}
+
+# Freundlich isotherm parameters: S = K_F * C^n_F
+# K_F [ml/g], n_F [-]
 FREUNDLICH_DB = {
     "Cs-137": (500.0, 0.85),
     "Sr-90":  (50.0, 0.90),
     "Pu-239": (2000.0, 0.80),
     "U-238":  (100.0, 0.75),
-}# Decay constants, 1/s
+}
+
+# Decay constants, 1/s
 DECAY_S = {
     "Cs-137": 7.31e-10,
     "Sr-90": 7.27e-10,
@@ -40,8 +77,16 @@ DECAY_S = {
     "I-131": 9.98e-7,
     "Tc-99": 3.20e-14,
     "Se-79": 4.17e-10,
-}# =====================================================================# Core sorption functions# =====================================================================def retardation(rho_b, kd_ml_g, theta):
+}
+
+
+# =====================================================================
+# Core sorption functions
+# =====================================================================
+
+def retardation(rho_b, kd_ml_g, theta):
     """Retardation factor R = 1 + rho_b * Kd / theta.
+
     Parameters
     ----------
     rho_b : float
@@ -49,28 +94,43 @@ DECAY_S = {
     kd_ml_g : float
         Distribution coefficient [ml/g].
     theta : float
-        Volumetric water content (dimensionless, 0–1).
+        Volumetric water content (dimensionless, 0-1).
+
     Returns
     -------
     R : float
     """
-    return 1.0 + rho_b * kd_ml_g / thetadef kd(nuclide, scenario="mid"):
+    return 1.0 + rho_b * kd_ml_g / theta
+
+
+def kd(nuclide, scenario="mid"):
     """Kd from database for a given uncertainty scenario.
+
     Parameters
     ----------
     nuclide : str
         Nuclide key (e.g. 'Cs-137').
     scenario : {'low', 'mid', 'high'}
         Uncertainty scenario.  'mid' uses geometric mean.
+
     Returns
     -------
     kd_val : float
         Distribution coefficient [ml/g].
     """
     lo, hi = KD_DB.get(nuclide, (10.0, 1000.0))
-    return {"low": lo, "mid": float(np.sqrt(lo * hi)), "high": hi}[scenario]# =====================================================================# pH-dependent and isotherm-based Kd# =====================================================================def kd_ph(nuclide, pH, clay_frac=0.2, oc_frac=0.02):
+    return {"low": lo, "mid": float(np.sqrt(lo * hi)), "high": hi}[scenario]
+
+
+# =====================================================================
+# pH-dependent and isotherm-based Kd
+# =====================================================================
+
+def kd_ph(nuclide, pH, clay_frac=0.2, oc_frac=0.02):
     """pH-dependent distribution coefficient.
+
     log10(Kd) = a_pH * pH + b_clay * clay_frac + c_oc * oc_frac + d
+
     Parameters
     ----------
     nuclide : str
@@ -80,6 +140,7 @@ DECAY_S = {
         Clay fraction (0-1).  Default 0.2.
     oc_frac : float
         Organic carbon fraction (0-1).  Default 0.02.
+
     Returns
     -------
     kd_val : float
@@ -90,11 +151,17 @@ DECAY_S = {
         return kd(nuclide, "mid")  # fallback to database
     log_kd = (params["a_pH"] * pH + params["b_clay"] * clay_frac
               + params["c_oc"] * oc_frac + params["d"])
-    return float(10.0 ** log_kd)def kd_freundlich(nuclide, C, K_F=None, n_F=None):
+    return float(10.0 ** log_kd)
+
+
+def kd_freundlich(nuclide, C, K_F=None, n_F=None):
     """Concentration-dependent Kd via Freundlich isotherm.
+
     S = K_F * C^n_F  =>  Kd(C) = S/C = K_F * C^(n_F - 1)
+
     At low concentrations (C -> 0) and n_F < 1, Kd -> infinity
     (strong sorption at trace levels, realistic for radionuclides).
+
     Parameters
     ----------
     nuclide : str
@@ -105,6 +172,7 @@ DECAY_S = {
         Freundlich constant [ml/g * (L/g)^(n_F-1)].
     n_F : float or None
         Freundlich exponent.  n_F < 1: concave (favourable).
+
     Returns
     -------
     kd_eff : float
@@ -113,8 +181,12 @@ DECAY_S = {
     if K_F is None or n_F is None:
         K_F, n_F = FREUNDLICH_DB.get(nuclide, (100.0, 0.85))
     C = max(float(C), 1e-30)
-    return K_F * C ** (n_F - 1.0)def retardation_freundlich(rho_b, nuclide, C, theta, **kw):
+    return K_F * C ** (n_F - 1.0)
+
+
+def retardation_freundlich(rho_b, nuclide, C, theta, **kw):
     """Retardation factor with concentration-dependent (Freundlich) Kd.
+
     Parameters
     ----------
     rho_b : float
@@ -122,14 +194,24 @@ DECAY_S = {
     C : float or ndarray
         Concentration.
     theta : float
+
     Returns
     -------
     R : float or ndarray
     """
     kd_eff = kd_freundlich(nuclide, C, **kw)
-    return 1.0 + rho_b * kd_eff / theta# =====================================================================# Gas-phase transport (Rn-222)# =====================================================================def millington_quirk_d_gas(D0, theta, theta_a):
+    return 1.0 + rho_b * kd_eff / theta
+
+
+# =====================================================================
+# Gas-phase transport (Rn-222)
+# =====================================================================
+
+def millington_quirk_d_gas(D0, theta, theta_a):
     """Effective gas diffusivity (Rn-222) in porous media [m^2/s].
+
     D_e = D0 * theta_a^(10/3) / theta^2   (Millington & Quirk, 1961).
+
     Parameters
     ----------
     D0 : float
@@ -138,17 +220,29 @@ DECAY_S = {
         Total porosity.
     theta_a : float
         Air-filled porosity.
+
     Returns
     -------
     D_e : float
     """
-    return D0 * theta_a ** (10.0 / 3.0) / max(theta, 1e-6) ** 2# =====================================================================# Analytical transport profiles# =====================================================================def pulse_profile(z, A0, t, D, v, R, lam):
+    return D0 * theta_a ** (10.0 / 3.0) / max(theta, 1e-6) ** 2
+
+
+# =====================================================================
+# Analytical transport profiles
+# =====================================================================
+
+def pulse_profile(z, A0, t, D, v, R, lam):
     """a(z, t) [Bq/m^3]: instantaneous surface deposition A0 [Bq/m^2] at t=0.
+
     Gaussian spreading with retardation and reflection at z=0:
+
     a(z,t) = A0 * exp(-lam*t) / sqrt(4*pi*D_s*t) * [
         exp(-(z - v_s*t)^2 / (4*D_s*t)) +
         exp(-(z + v_s*t)^2 / (4*D_s*t))]
+
     where D_s = D/R, v_s = v/R.
+
     Parameters
     ----------
     z : array-like
@@ -165,6 +259,7 @@ DECAY_S = {
         Retardation factor.
     lam : float
         Radioactive decay constant [1/s].
+
     Returns
     -------
     a : np.ndarray, shape (len(z),)
@@ -177,9 +272,14 @@ DECAY_S = {
     s2 = 4.0 * Ds * t
     g = (np.exp(-((z - vs * t) ** 2) / s2)
          + np.exp(-((z + vs * t) ** 2) / s2)) / np.sqrt(np.pi * s2)
-    return A0 * np.exp(-lam * t) * gdef exp_profile(z, A, lam_relax_m):
+    return A0 * np.exp(-lam * t) * g
+
+
+def exp_profile(z, A, lam_relax_m):
     """Diffusion-limited profile: a(z) = (A / lam) * exp(-z / lam).
+
     Normalised so that integral_0^inf a(z) dz = A [Bq/m^2].
+
     Parameters
     ----------
     z : array-like
@@ -188,15 +288,21 @@ DECAY_S = {
         Areal activity [Bq/m^2].
     lam_relax_m : float
         Relaxation length [m].
+
     Returns
     -------
     a : np.ndarray
     """
     lam = max(float(lam_relax_m), 1e-6)
-    return A / lam * np.exp(-np.asarray(z, float) / lam)def chain_evolve(lams, A0, t, branch=None):
+    return A / lam * np.exp(-np.asarray(z, float) / lam)
+
+
+def chain_evolve(lams, A0, t, branch=None):
     """Bateman equations for a decay chain.
+
     A(t) = expm(M * t) @ A0,  where M[i,i] = -lambda_i,
     M[i, i-1] = lambda_{i-1} * b_{i-1}.
+
     Parameters
     ----------
     lams : array-like
@@ -207,6 +313,7 @@ DECAY_S = {
         Time [s].
     branch : array-like, optional
         Branching ratios (length len(lams)-1).  Default 1.0.
+
     Returns
     -------
     A : np.ndarray, shape (len(lams),)
@@ -218,13 +325,22 @@ DECAY_S = {
     for i in range(1, n):
         b = branch[i - 1] if branch is not None else 1.0
         M[i, i - 1] = lams[i - 1] * b
-    return expm(M * t) @ np.asarray(A0, float)# =====================================================================# Multi-layer soil transport# =====================================================================def multi_layer_pulse(z, A0, t, layers):
+    return expm(M * t) @ np.asarray(A0, float)
+
+
+# =====================================================================
+# Multi-layer soil transport
+# =====================================================================
+
+def multi_layer_pulse(z, A0, t, layers):
     """Pulse profile through a multi-layer soil column.
+
     Each layer has its own D, v, R, rho_b, theta.  The solution
     is computed by matching boundary conditions at layer interfaces.
     For thin layers (diffusion time << transit time), the
     Laplace-domain solution simplifies to a product of
     retardation factors and an effective Gaussian.
+
     Parameters
     ----------
     z : array-like
@@ -237,6 +353,7 @@ DECAY_S = {
         Each dict has keys: 'z_top' [m], 'z_bot' [m],
         'D' [m^2/s], 'v' [m/s], 'R' [-], 'lam' [1/s].
         Layers must be contiguous and ordered top to bottom.
+
     Returns
     -------
     a : np.ndarray, shape (len(z),)
@@ -256,17 +373,22 @@ DECAY_S = {
         lam_eff = L["lam"]
         a[mask] = pulse_profile(z_local, A0, t, D_eff, v_eff,
                                R_eff, lam_eff)
-    return adef effective_properties(z, layers):
+    return a
+
+
+def effective_properties(z, layers):
     """Get effective transport properties at each depth from layer definitions.
+
     Parameters
     ----------
     z : array-like
         Depth grid [m].
     layers : list of dict
         Layer definitions with 'z_top', 'z_bot', and property keys.
+
     Returns
     -------
- props : dict of ndarray
+    props : dict of ndarray
         Each key maps to an array of shape (len(z),) with the
         property value at each depth.
     """
@@ -280,16 +402,27 @@ DECAY_S = {
         for k in keys:
             if k in L:
                 props[k][mask] = L[k]
-    return props# =====================================================================# Numerical ADE solver (Crank-Nicolson)# =====================================================================def ade_solve(z, t_span, D, v, R, lam, C0_func=None,
+    return props
+
+
+# =====================================================================
+# Numerical ADE solver (Crank-Nicolson)
+# =====================================================================
+
+def ade_solve(z, t_span, D, v, R, lam, C0_func=None,
               dz=None, dt=None, n_save=100):
     """Numerical solution of 1D ADE using Crank-Nicolson.
+
     R * dC/dt = D * d^2C/dz^2 - v * dC/dz - lam * R * C
+
     with boundary conditions:
         C(z=0, t) = C0_func(t)  (Dirichlet, if given)
         dC/dz(z=L, t) = 0       (no-flux at bottom)
     Initial condition: C(z, 0) = 0.
+
     The Crank-Nicolson scheme is unconditionally stable and
     second-order accurate in both space and time.
+
     Parameters
     ----------
     z : array-like or None
@@ -313,6 +446,7 @@ DECAY_S = {
         Time step.  If None, auto-computed (n_save steps).
     n_save : int
         Number of time points to save.
+
     Returns
     -------
     result : dict
@@ -411,8 +545,12 @@ DECAY_S = {
         C[-1] = C[-2]  # no-flux
     # Ensure all saves are done
     C_saved[-1] = C.copy()
-    return {"z": z, "t": t_save, "C": C_saved}def _thomas_solve(a, b, c, d):
+    return {"z": z, "t": t_save, "C": C_saved}
+
+
+def _thomas_solve(a, b, c, d):
     """Thomas algorithm for tridiagonal system.
+
     a: sub-diagonal (n-1), b: diagonal (n), c: super-diagonal (n-1), d: rhs (n).
     """
     n = len(b)

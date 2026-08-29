@@ -1,6 +1,8 @@
 """Tests for the fredholm depth-inversion subpackage.
 
 Twin experiments: synthetic profiles -> forward count rates -> inversion -> recovery.
+Covers classical solvers, geophysical solvers, transport chemistry,
+Bayesian methods, criteria, diagnostics, and pipeline ensemble.
 """
 import numpy as np
 import pytest
@@ -9,6 +11,14 @@ from soilactivity.depth_inversion import (
     GammaLine, Detector, build_kernel, kernel_analytic,
     DepthInverter, pulse_profile, exp_profile, retardation, kd,
     chain_evolve, DECAY_S, tikhonov, tsvd, landweber, cimmino,
+    cgls, kaczmarz, fista, tv_admm, focusing_irls,
+    chi2, gcv_curve, lcurve_corner, choose_alpha_discrepancy,
+    quasi_optimality, ncp_criterion, snr_criterion,
+    resolution_matrix, depth_of_investigation, singulars,
+    model_covariance, spread_function, information_content,
+    ensemble_kalman_inversion, laplace_map,
+    kd_ph, kd_freundlich, multi_layer_pulse,
+    FREUNDLICH_DB, KD_PH_PARAMS,
 )
 
 # Cs-137 line at 661.66 keV (rho_soil=1.4 g/cm3 -> mu_soil ~10.8 /m)
@@ -23,6 +33,10 @@ EU = [
 
 YEAR_S = 3.156e7
 
+
+# =====================================================================
+# Kernel tests
+# =====================================================================
 
 def test_kernel_numeric_matches_analytic():
     """Numeric kernel should agree with E1 analytic within ~0.2%."""
@@ -39,6 +53,10 @@ def test_kernel_shape():
     K = build_kernel(EU, det, z)
     assert K.shape == (3, 20)
 
+
+# =====================================================================
+# Transport chemistry tests
+# =====================================================================
 
 def test_transport_kd():
     """Kd database lookup."""
@@ -76,6 +94,43 @@ def test_transport_chain_evolve():
     assert At[0] < A0[0]
     assert At[0] > 0
 
+
+def test_transport_kd_ph():
+    """pH-dependent Kd."""
+    kd_mid = kd("Cs-137", "mid")
+    kd_ph5 = kd_ph("Cs-137", 5.0)
+    kd_ph8 = kd_ph("Cs-137", 8.0)
+    # Higher pH should generally give higher Kd for Cs
+    assert kd_ph8 > kd_ph5
+    # pH model should give reasonable values
+    assert 1.0 < kd_ph5 < 1e6
+
+
+def test_transport_freundlich():
+    """Freundlich isotherm Kd."""
+    K_F, n_F = FREUNDLICH_DB["Cs-137"]
+    assert K_F > 0
+    assert n_F < 1.0  # favourable isotherm
+    kd_low = kd_freundlich("Cs-137", 0.001)
+    kd_high = kd_freundlich("Cs-137", 10.0)
+    assert kd_low > kd_high  # lower conc -> higher Kd for n<1
+
+
+def test_transport_multi_layer():
+    """Multi-layer pulse profile."""
+    z = np.linspace(0, 0.5, 50)
+    layers = [
+        {"z_top": 0.0, "z_bot": 0.1, "D": 1e-10, "v": 0.0, "R": 500.0, "lam": DECAY_S["Cs-137"]},
+        {"z_top": 0.1, "z_bot": 0.5, "D": 5e-11, "v": 0.0, "R": 2000.0, "lam": DECAY_S["Cs-137"]},
+    ]
+    a = multi_layer_pulse(z, 1e5, 25 * YEAR_S, layers)
+    assert a.shape == z.shape
+    assert a.min() >= 0.0
+
+
+# =====================================================================
+# Solver tests
+# =====================================================================
 
 def _twin_eu(scale=2.0e4, seed=1, n_z=20):
     """Helper: Eu-152 twin experiment."""
@@ -123,7 +178,7 @@ def test_solvers_agree():
                        nonneg=True, max_iter=20000)
     for x in (x1, x2, x3):
         assert np.all(x >= 0)
-        assert np.sum(x * inv.dz) > 0  # recovered some areal activity
+        assert np.sum(x * inv.dz) > 0
 
 
 def test_tsvd():
@@ -133,3 +188,231 @@ def test_tsvd():
     x, info = tsvd(inv.K, counts, sigma=sg, nonneg=True)
     assert np.all(x >= 0)
     assert 0 < info["rank"] <= min(inv.K.shape)
+
+
+def test_cgls():
+    """CGLS should converge and give non-negative result."""
+    inv, _, counts = _twin_eu(seed=5)
+    x, info = cgls(inv.K, counts, max_iter=100, nonneg=True)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+    assert info["iterations"] > 0
+    assert len(info["chi2_history"]) == info["iterations"]
+
+
+def test_kaczmarz():
+    """Kaczmarz should give non-negative result."""
+    inv, _, counts = _twin_eu(seed=6)
+    x, info = kaczmarz(inv.K, counts, max_iter=100, nonneg=True, seed=42)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+
+
+def test_fista():
+    """FISTA (L1 sparse) should give non-negative, sparse result."""
+    inv, _, counts = _twin_eu(seed=7)
+    A, b = inv.K, counts
+    sv_max = np.linalg.svd(A, compute_uv=False)[0]
+    alpha = sv_max ** 2 * 1e-3
+    x, info = fista(A, b, alpha, nonneg=True, max_iter=500)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+    # L1 solution should be sparser than Tikhonov
+    x_tik = tikhonov(A, b, alpha * 10, nonneg=True)
+    assert np.sum(x > 0) <= np.sum(x_tik > 0) + 5
+
+
+def test_tv_admm():
+    """TV/ADMM should preserve non-negativity."""
+    inv, _, counts = _twin_eu(seed=8)
+    A, b = inv.K, counts
+    sv_max = np.linalg.svd(A, compute_uv=False)[0]
+    alpha = sv_max ** 2 * 1e-3
+    x, info = tv_admm(A, b, alpha, nonneg=True, max_iter=100)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+
+
+def test_focusing_mgs():
+    """Focusing MGS should give non-negative blocky result."""
+    inv, _, counts = _twin_eu(seed=9)
+    A, b = inv.K, counts
+    sv_max = np.linalg.svd(A, compute_uv=False)[0]
+    alpha = sv_max ** 2 * 1e-2
+    x, info = focusing_irls(A, b, alpha, mode="mgs", nonneg=True)
+    assert np.all(x >= 0)
+    assert np.sum(x * inv.dz) > 0
+    assert info["iterations"] > 0
+
+
+def test_focusing_ms():
+    """Focusing MS (minimum support) should give non-negative result."""
+    inv, _, counts = _twin_eu(seed=10)
+    A, b = inv.K, counts
+    sv_max = np.linalg.svd(A, compute_uv=False)[0]
+    alpha = sv_max ** 2 * 1e-2
+    x, info = focusing_irls(A, b, alpha, mode="ms", nonneg=True)
+    assert np.all(x >= 0)
+
+
+# =====================================================================
+# Criteria tests
+# =====================================================================
+
+def test_criteria_basic():
+    """GCV, L-curve, discrepancy should all return finite alphas."""
+    inv, _, counts = _twin_eu(seed=1)
+    A, b = inv.K, counts
+    sg = inv.poisson_sigma(counts)
+    Aw = A / sg[:, None]
+    bw = b / sg
+    L = np.eye(len(inv.z))
+    alphas = np.geomspace(1e-10, 1e2, 32)
+    # GCV
+    gcv_vals = gcv_curve(Aw, bw, alphas, L=L)
+    assert np.all(np.isfinite(gcv_vals))
+    # L-curve
+    alpha_lc, kappa = lcurve_corner(Aw, bw, alphas, L=L)
+    assert np.isfinite(alpha_lc)
+    # Discrepancy
+    alpha_disc = choose_alpha_discrepancy(Aw, bw, L=L)
+    assert np.isfinite(alpha_disc)
+
+
+def test_criteria_quasi_optimality():
+    """Quasi-optimality should return a finite alpha."""
+    inv, _, counts = _twin_eu(seed=1)
+    A, b = inv.K, counts
+    sg = inv.poisson_sigma(counts)
+    Aw = A / sg[:, None]
+    bw = b / sg
+    alphas = np.geomspace(1e-10, 1e2, 32)
+    alpha_qo, qo_vals = quasi_optimality(Aw, bw, alphas)
+    assert np.isfinite(alpha_qo)
+    assert np.all(np.isfinite(qo_vals))
+
+
+def test_criteria_ncp():
+    """NCP criterion should return a finite alpha."""
+    inv, _, counts = _twin_eu(seed=1)
+    A, b = inv.K, counts
+    sg = inv.poisson_sigma(counts)
+    Aw = A / sg[:, None]
+    bw = b / sg
+    alphas = np.geomspace(1e-10, 1e2, 32)
+    alpha_ncp, ncp_vals = ncp_criterion(Aw, bw, alphas)
+    assert np.isfinite(alpha_ncp)
+
+
+def test_criteria_snr():
+    """SNR criterion should return a finite alpha."""
+    inv, _, counts = _twin_eu(seed=1)
+    A, b = inv.K, counts
+    sg = inv.poisson_sigma(counts)
+    Aw = A / sg[:, None]
+    bw = b / sg
+    alphas = np.geomspace(1e-10, 1e2, 32)
+    alpha_snr, snr_vals = snr_criterion(Aw, bw, alphas)
+    assert np.isfinite(alpha_snr)
+
+
+# =====================================================================
+# Diagnostics tests
+# =====================================================================
+
+def test_diagnostics_resolution():
+    """Resolution matrix and DOI should be finite."""
+    inv, _, counts = _twin_eu(seed=1)
+    R = resolution_matrix(inv.K, alpha=1e-4)
+    assert R.shape == (len(inv.z), len(inv.z))
+    doi = depth_of_investigation(R, inv.z)
+    assert doi.shape == (len(inv.z),)
+    assert np.all(doi >= 0)
+
+
+def test_diagnostics_covariance():
+    """Model covariance should be symmetric positive semi-definite."""
+    inv, _, counts = _twin_eu(seed=1)
+    Cov = model_covariance(inv.K, alpha=1e-4)
+    assert Cov.shape == (len(inv.z), len(inv.z))
+    assert np.allclose(Cov, Cov.T, atol=1e-12)
+    eigvals = np.linalg.eigvalsh(Cov)
+    assert np.all(eigvals >= -1e-10)
+
+
+def test_diagnostics_spread():
+    """Spread function should be non-negative."""
+    inv, _, counts = _twin_eu(seed=1)
+    R = resolution_matrix(inv.K, alpha=1e-4)
+    sp = spread_function(R, inv.z)
+    assert sp.shape == (len(inv.z),)
+    assert np.all(sp >= 0)
+
+
+def test_diagnostics_info():
+    """Information content metrics should be finite."""
+    inv, _, counts = _twin_eu(seed=1)
+    info = information_content(inv.K)
+    assert np.isfinite(info["cond"])
+    assert 0 < info["rank_eff"] <= min(inv.K.shape)
+
+
+def test_diagnostics_singulars():
+    """SVD spectrum should be non-negative and decreasing."""
+    inv, _, counts = _twin_eu(seed=1)
+    sv, scale = singulars(inv.K)
+    assert len(sv) == min(inv.K.shape)
+    assert np.all(sv >= 0)
+    assert np.all(np.diff(sv) <= 1e-10)
+
+
+# =====================================================================
+# Bayesian tests
+# =====================================================================
+
+def test_eki_basic():
+    """EKI should return non-negative ensemble with finite uncertainty."""
+    inv, _, counts = _twin_eu(seed=1)
+    res = ensemble_kalman_inversion(
+        inv.K, counts, n_ens=50, n_iter=10, prior_std=1e4, seed=42)
+    assert np.all(res["mean"] >= -1e-3)  # allow tiny negatives
+    assert np.all(res["std"] >= 0)
+    assert res["ensemble"].shape == (50, len(inv.z))
+    assert np.sum(res["mean"] * inv.dz) > 0
+
+
+def test_laplace_map():
+    """Laplace MAP should return non-negative result with uncertainty."""
+    inv, _, counts = _twin_eu(seed=1)
+    res = laplace_map(inv.K, counts, alpha=1e-4, nonneg=True)
+    assert np.all(res["map"] >= 0)
+    assert np.all(res["std"] >= 0)
+    assert res["cov"].shape == (len(inv.z), len(inv.z))
+
+
+# =====================================================================
+# Pipeline ensemble test
+# =====================================================================
+
+def test_pipeline_ensemble():
+    """Ensemble fit should return multiple results with AIC/BIC."""
+    inv, _, counts = _twin_eu(seed=1)
+    out = inv.fit_ensemble(counts, methods=["tikhonov/gcv", "cgls"])
+    assert len(out["results"]) >= 1
+    assert len(out["aic"]) == len(out["results"])
+    assert out["best"].a is not None
+    assert np.all(out["best"].a >= 0)
+
+
+def test_pipeline_tv():
+    """Pipeline TV fit should work."""
+    inv, _, counts = _twin_eu(seed=2)
+    res = inv.fit_tv(counts)
+    assert np.all(res.a >= 0)
+
+
+def test_pipeline_sparse():
+    """Pipeline FISTA fit should work."""
+    inv, _, counts = _twin_eu(seed=3)
+    res = inv.fit_sparse(counts)
+    assert np.all(res.a >= 0)

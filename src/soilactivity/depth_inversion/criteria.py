@@ -1,1 +1,279 @@
-"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy,    and geophysical extensions (quasi-optimality, NCP, SNR, weighted GCV).All operate in the weighted space (A = K/sigma, b = d/sigma).References----------    Golub, Heath & Wahba (1979) GCV.    Hansen (1992, 2006) L-curve.    Morozov (1966) discrepancy principle.    Hochstenbach & Reichel (2015) parameter determination, J. Comp. Appl. Math.    Farquharson & Oldenburg (2004) comparison of automatic techniques, GJI 156(3):411.    Chen et al. (2021) comparative studies, Inverse Problems in Sci. & Eng."""from __future__ import division, print_function, absolute_importimport numpy as npfrom scipy.optimize import brentqdef chi2(K, d, x, sigma=None):    """Chi-squared misfit: ||Kx - d||_W^2 where W = diag(1/sigma).    Parameters    ----------    K : array-like (m, n)    d : array-like (m,)    x : array-like (n,)    sigma : array-like (m,) or None    Returns    -------    chi2 : float    """    r = np.asarray(K, float) @ np.asarray(x, float) - np.asarray(d, float)    if sigma is not None:        r = r / np.asarray(sigma, float)    return float(r @ r)def _lin_solve(A, b, alpha, L=None):    """Solve the (unconstrained) Tikhonov system, return (x, M).    M = A^T A + alpha * L^T L.    """    n = A.shape[1]    L = np.eye(n) if L is None else L    M = A.T @ A + alpha * (L.T @ L)    x = np.linalg.solve(M, A.T @ b)    return x, Mdef _chi2_alpha(A, b, alpha, L):    x, _ = _lin_solve(A, b, alpha, L)    r = A @ x - b    return float(r @ r)def gcv_point(A, b, alpha, L=None, n_probe=24, seed=0):    """GCV(alpha) = n * ||Ax - b||^2 / tr(I - H)^2.    The trace is estimated via Hutchinson's stochastic trace estimator    with n_probe random +/-1 probe vectors.    Parameters    ----------    A : ndarray (m, n)  — weighted system matrix    b : ndarray (m,)    alpha : float    L : ndarray (p, n) or None    n_probe : int    seed : int    Returns    -------    gcv : float    """    x, M = _lin_solve(A, b, alpha, L)    r = A @ x - b    n = len(b)    rng = np.random.default_rng(seed)    V = rng.choice([-1.0, 1.0], size=(n, n_probe))    HV = A @ np.linalg.solve(M, A.T @ V)    tr = float(np.mean(np.sum(V * (V - HV), axis=0)))    return float(n * (r @ r) / max(tr, 1e-12) ** 2)def gcv_curve(A, b, alphas, L=None, **kw):    """Evaluate GCV for a grid of alpha values.    Returns    -------    gcv_vals : np.ndarray, shape (len(alphas),)    """    return np.array([gcv_point(A, b, a, L, **kw) for a in alphas])def _menger_curvature(p1, p2, p3):    """Menger curvature of three 2-D points (log-space)."""    (x1, y1), (x2, y2), (x3, y3) = p1, p2, p3    a = np.hypot(x2 - x1, y2 - y1)    b_ = np.hypot(x3 - x2, y3 - y2)    c = np.hypot(x3 - x1, y3 - y1)    s2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))    return 2.0 * s2 / max(a * b_ * c, 1e-300)def lcurve_corner(A, b, alphas, L=None):    """L-curve corner: maximum Menger curvature on (log ||Lx||, log ||r||).    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    alphas : array-like    L : ndarray (p, n) or None    Returns    -------    alpha_corner : float    kappa : ndarray, shape (len(alphas),)        Curvature at each alpha (0 at endpoints).    """    alphas = np.asarray(alphas, float)    n = A.shape[1]    Lf = np.eye(n) if L is None else L    reg = np.empty(len(alphas))    res = np.empty(len(alphas))    for j, a in enumerate(alphas):        x, _ = _lin_solve(A, b, a, L)        reg[j] = np.log(max(np.linalg.norm(Lf @ x), 1e-300))        r = A @ x - b        res[j] = np.log(max(float(r @ r), 1e-300))    kappa = np.zeros(len(alphas))    for j in range(1, len(alphas) - 1):        kappa[j] = _menger_curvature(            (reg[j - 1], res[j - 1]),            (reg[j], res[j]),            (reg[j + 1], res[j + 1]))    return float(alphas[int(np.argmax(kappa))]), kappadef choose_alpha_discrepancy(A, b, L=None, n_target=None,                              lo=1e-12, hi=1e3):    """Morozov discrepancy principle: find alpha such that chi^2(alpha) = n.    Uses Brent's method on a log-spaced grid.    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    L : ndarray or None    n_target : float or None        Target chi^2 (default: m = number of data).    lo, hi : float        Search bounds on alpha.    Returns    -------    alpha : float    """    n = len(b) if n_target is None else n_target    grid = np.geomspace(lo, hi, 64)    vals = np.array([_chi2_alpha(A, b, a, L) for a in grid])    idx = np.where(vals < n)[0]    if idx.size == 0:        return float(grid[-1])    j = int(idx[-1])    if j >= len(grid) - 1:        return float(grid[j])    try:        la = brentq(lambda t: _chi2_alpha(A, b, 10.0 ** t, L) - n,                     np.log10(grid[j]), np.log10(grid[j + 1]), xtol=1e-3)        return float(10.0 ** la)    except ValueError:        return float(grid[j])# =====================================================================# Geophysical extensions (2015-2025)# =====================================================================def quasi_optimality(A, b, alphas, L=None):    """Quasi-optimality criterion (Tikhonov & Glasko, 1965;    Hochstenbach & Reichel, 2015).    Selects alpha that minimises ||x_{alpha, h} - x_{alpha, 2h}||,    i.e., the difference between solutions on nested grids.    Approximated without a coarser grid by comparing successive    SVD truncation levels:        Q(alpha) = sqrt( sum_{i: sigma_i^2 < alpha} (u_i^T b)^2 / sigma_i^2 )    This measures the norm of the high-frequency (noise-dominated)    part of the solution.    Advantages:    - Does NOT require noise level (unlike discrepancy principle)    - Works well for severely ill-posed problems where GCV fails    - Very fast: only needs SVD once    Reference: Hochstenbach & Reichel (2015) J. Comp. Appl. Math.    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    alphas : array-like        Regularisation parameter grid.    L : ndarray or None        (Present for API compatibility; not used directly.)    Returns    -------    alpha_qo : float        Selected parameter.    qo_vals : ndarray, shape (len(alphas),)        Quasi-optimality values.    """    alphas = np.asarray(alphas, float)    U, sv, Vt = svd(A, full_matrices=False)    Ub = U.T @ b  # coefficients in SVD basis    qo_vals = np.empty(len(alphas))    for j, alpha in enumerate(alphas):        # Sum of noise-dominated components (sigma_i^2 < alpha)        mask = sv ** 2 < alpha        if np.any(mask):            qo_vals[j] = float(np.sqrt(                np.sum((Ub[mask] / sv[mask]) ** 2)))        else:            qo_vals[j] = 0.0    return float(alphas[int(np.argmin(qo_vals))]), qo_valsdef ncp_criterion(A, b, alphas, L=None):    """Normalised Cumulative Periodogram (NCP) / residual whiteness test.    Tests whether the residual r = Ax - b is white noise (as it should    be for the correct alpha).  The NCP measures deviation from whiteness    by comparing the cumulative periodogram of the residual to the    theoretical CDF of uniform order statistics (Kolmogorov-Smirnov).    NCP(alpha) = max_j |CDF_j - j/(m-1)|    where CDF_j = sum_{k=1}^j I_k / sum I_k, and I_k = |FFT(r)_k|^2.    Select alpha where NCP is minimised (residual closest to white noise).    Reference: Hansen (1992) Analysis of discrete ill-posed problems by    means of the L-curve.  Also used in Farquharson & Oldenburg (2004).    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    alphas : array-like    L : ndarray or None    Returns    -------    alpha_ncp : float    ncp_vals : ndarray, shape (len(alphas),)    """    alphas = np.asarray(alphas, float)    m = len(b)    ncp_vals = np.empty(len(alphas))    for j, alpha in enumerate(alphas):        x, _ = _lin_solve(A, b, alpha, L)        r = A @ x - b        # Periodogram of residual        R = np.fft.rfft(r)        I = np.abs(R) ** 2        I[0] = 0.0  # remove DC        I_sum = np.sum(I)        if I_sum < 1e-30:            ncp_vals[j] = 1.0            continue        cdf = np.cumsum(I) / I_sum        j_arr = np.arange(len(cdf))        ks = np.max(np.abs(cdf - j_arr / max(len(cdf) - 1, 1)))        ncp_vals[j] = float(ks)    return float(alphas[int(np.argmin(ncp_vals))]), ncp_valsdef snr_criterion(A, b, alphas, L=None):    """Signal-to-Noise Ratio (SNR) criterion.    Selects alpha that maximises the estimated SNR of the solution.    SNR(alpha) = ||x_alpha||^2 / tr(Cov(x_alpha))    where Cov(x_alpha) = (A^T A + alpha I)^{-1} (noise covariance).    For unit-weighted data: Cov = sigma^2 (A^T A + alpha I)^{-1}    and we use the approximation sigma^2 ~ ||r||^2 / (m - n).    The trace is computed via the SVD:        tr(Cov) = sigma^2 * sum_i 1/(sigma_i^2 + alpha)    This is a simplified version of the method discussed in    Farquharson & Oldenburg (2004) GJI 156(3):411.    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    alphas : array-like    L : ndarray or None    Returns    -------    alpha_snr : float    snr_vals : ndarray, shape (len(alphas),)    """    alphas = np.asarray(alphas, float)    m, n = A.shape    U, sv, Vt = svd(A, full_matrices=False)    Ub = U.T @ b    snr_vals = np.empty(len(alphas))    for j, alpha in enumerate(alphas):        # Solution norm squared (in SVD basis)        x_norm2 = float(np.sum((Ub * sv / (sv ** 2 + alpha)) ** 2))        # Trace of covariance        cov_tr = float(np.sum(1.0 / (sv ** 2 + alpha)))        # Estimate noise variance from residual        x_svd = Vt.T @ (Ub * sv / (sv ** 2 + alpha))        r = A @ x_svd - b        sigma2 = float(r @ r) / max(m - n, 1)        snr_vals[j] = x_norm2 / max(sigma2 * cov_tr, 1e-30)    return float(alphas[int(np.argmax(snr_vals))]), snr_valsdef gcv_weighted(A, b, alpha, L=None, sigma_data=None, n_probe=24,                   seed=0):    """Weighted GCV with heteroscedastic (per-point) noise model.    Standard GCV assumes homoscedastic noise.  For gamma spectrometry,    Poisson statistics give sigma_i = sqrt(n_i), making noise    heteroscedastic.  This criterion accounts for that.    GCV_w(alpha) = sum_i w_i (Ax - b)_i^2 / (sum_i w_i (1 - H_ii))^2    where w_i = 1/sigma_i^2.    When sigma_data is None, falls back to standard GCV.    Parameters    ----------    A : ndarray (m, n)    b : ndarray (m,)    alpha : float    L : ndarray (p, n) or None    sigma_data : ndarray (m,) or None        Per-point noise standard deviations.    n_probe : int    seed : int    Returns    -------    gcv_w : float    """    if sigma_data is None:        return gcv_point(A, b, alpha, L, n_probe, seed)    w = 1.0 / (np.asarray(sigma_data, float) ** 2)    # Weighted system    Aw = A * np.sqrt(w)[:, None]    bw = b * np.sqrt(w)    x, M = _lin_solve(Aw, bw, alpha, L)    r = Aw @ x - bw    n = len(b)    # Weighted GCV numerator    numer = float(r @ r)    # Trace estimate    rng = np.random.default_rng(seed)    V = rng.choice([-1.0, 1.0], size=(n, n_probe))    HV = Aw @ np.linalg.solve(M, Aw.T @ V)    tr = float(np.mean(np.sum(V * (V - HV), axis=0)))    denom = max(tr, 1e-12) ** 2    return float(n * numer / denom)def gcv_weighted_curve(A, b, alphas, L=None, sigma_data=None, **kw):    """Evaluate weighted GCV for a grid of alpha values.    Returns    -------    gcv_vals : np.ndarray, shape (len(alphas),)    """    return np.array([gcv_weighted(A, b, a, L, sigma_data=sigma_data, **kw)                       for a in alphas])def lcurve_corner_iter(hist_residual, hist_solution_norm):    """L-curve corner detection for iterative methods (CGLS, Landweber).    For iterative solvers, the regularisation parameter is the    iteration count k.  This function finds the corner of the    L-curve from pre-computed residual and solution norm histories.    Parameters    ----------    hist_residual : array-like        ||Ax_k - b||^2 at each iteration k.    hist_solution_norm : array-like        ||x_k|| at each iteration k.    Returns    -------    k_corner : int        Optimal iteration count (corner of L-curve).    kappa : ndarray        Curvature at each iteration.    """    r = np.asarray(hist_residual, float)    s = np.asarray(hist_solution_norm, float)    # Work in log-space (avoid log(0))    eps = 1e-300    lr = np.log(np.maximum(r, eps))    ls = np.log(np.maximum(s, eps))    n = len(lr)    kappa = np.zeros(n)    for j in range(1, n - 1):        kappa[j] = _menger_curvature(            (lr[j - 1], ls[j - 1]),            (lr[j], ls[j]),            (lr[j + 1], ls[j + 1]))    return int(np.argmax(kappa)), kappa
+"""Regularisation parameter selection criteria: GCV, L-curve, discrepancy.
+
+All operate in the weighted space (A = K/sigma, b = d/sigma).
+
+References
+----------
+- Golub, Heath & Wahba (1979) GCV.
+- Hansen (1992, 2006) L-curve.
+- Morozov (1966) discrepancy principle.
+"""
+from __future__ import division, print_function, absolute_import
+
+import numpy as np
+from numpy.linalg import svd
+from scipy.optimize import brentq
+
+
+def chi2(K, d, x, sigma=None):
+    """Chi-squared misfit: ||Kx - d||_W^2 where W = diag(1/sigma).
+
+    Parameters
+    ----------
+    K : array-like (m, n)
+    d : array-like (m,)
+    x : array-like (n,)
+    sigma : array-like (m,) or None
+
+    Returns
+    -------
+    chi2 : float
+    """
+    r = np.asarray(K, float) @ np.asarray(x, float) - np.asarray(d, float)
+    if sigma is not None:
+        r = r / np.asarray(sigma, float)
+    return float(r @ r)
+
+
+def _lin_solve(A, b, alpha, L=None):
+    """Solve the (unconstrained) Tikhonov system, return (x, M).
+    M = A^T A + alpha * L^T L.
+    """
+    n = A.shape[1]
+    L = np.eye(n) if L is None else L
+    M = A.T @ A + alpha * (L.T @ L)
+    x = np.linalg.solve(M, A.T @ b)
+    return x, M
+
+
+def _chi2_alpha(A, b, alpha, L):
+    x, _ = _lin_solve(A, b, alpha, L)
+    r = A @ x - b
+    return float(r @ r)
+
+
+def gcv_point(A, b, alpha, L=None, n_probe=24, seed=0):
+    """GCV(alpha) = n * ||Ax - b||^2 / tr(I - H)^2.
+
+    The trace is estimated via Hutchinson's stochastic trace estimator
+    with n_probe random +/-1 probe vectors.
+
+    Parameters
+    ----------
+    A : ndarray (m, n)  — weighted system matrix
+    b : ndarray (m,)
+    alpha : float
+    L : ndarray (p, n) or None
+    n_probe : int
+    seed : int
+
+    Returns
+    -------
+    gcv : float
+    """
+    x, M = _lin_solve(A, b, alpha, L)
+    r = A @ x - b
+    n = len(b)
+    rng = np.random.default_rng(seed)
+    V = rng.choice([-1.0, 1.0], size=(n, n_probe))
+    HV = A @ np.linalg.solve(M, A.T @ V)
+    tr = float(np.mean(np.sum(V * (V - HV), axis=0)))
+    return float(n * (r @ r) / max(tr, 1e-12) ** 2)
+
+
+def gcv_curve(A, b, alphas, L=None, **kw):
+    """Evaluate GCV for a grid of alpha values.
+
+    Returns
+    -------
+    gcv_vals : np.ndarray, shape (len(alphas),)
+    """
+    return np.array([gcv_point(A, b, a, L, **kw) for a in alphas])
+
+
+def _menger_curvature(p1, p2, p3):
+    """Menger curvature of three 2-D points (log-space)."""
+    (x1, y1), (x2, y2), (x3, y3) = p1, p2, p3
+    a = np.hypot(x2 - x1, y2 - y1)
+    b_ = np.hypot(x3 - x2, y3 - y2)
+    c = np.hypot(x3 - x1, y3 - y1)
+    s2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+    return 2.0 * s2 / max(a * b_ * c, 1e-300)
+
+
+def lcurve_corner(A, b, alphas, L=None):
+    """L-curve corner: maximum Menger curvature on (log ||Lx||, log ||r||).
+
+    Parameters
+    ----------
+    A : ndarray (m, n)
+    b : ndarray (m,)
+    alphas : array-like
+    L : ndarray (p, n) or None
+
+    Returns
+    -------
+    alpha_corner : float
+    kappa : ndarray, shape (len(alphas),)
+        Curvature at each alpha (0 at endpoints).
+    """
+    alphas = np.asarray(alphas, float)
+    n = A.shape[1]
+    Lf = np.eye(n) if L is None else L
+    reg = np.empty(len(alphas))
+    res = np.empty(len(alphas))
+    for j, a in enumerate(alphas):
+        x, _ = _lin_solve(A, b, a, L)
+        reg[j] = np.log(max(np.linalg.norm(Lf @ x), 1e-300))
+        r = A @ x - b
+        res[j] = np.log(max(float(r @ r), 1e-300))
+    kappa = np.zeros(len(alphas))
+    for j in range(1, len(alphas) - 1):
+        kappa[j] = _menger_curvature(
+            (reg[j - 1], res[j - 1]),
+            (reg[j], res[j]),
+            (reg[j + 1], res[j + 1]))
+    return float(alphas[int(np.argmax(kappa))]), kappa
+
+
+def choose_alpha_discrepancy(A, b, L=None, n_target=None,
+                              lo=1e-12, hi=1e3):
+    """Morozov discrepancy principle: find alpha such that chi^2(alpha) = n.
+
+    Uses Brent's method on a log-spaced grid.
+
+    Parameters
+    ----------
+    A : ndarray (m, n)
+    b : ndarray (m,)
+    L : ndarray or None
+    n_target : float or None
+        Target chi^2 (default: m = number of data).
+    lo, hi : float
+        Search bounds on alpha.
+
+    Returns
+    -------
+    alpha : float
+    """
+    n = len(b) if n_target is None else n_target
+    grid = np.geomspace(lo, hi, 64)
+    vals = np.array([_chi2_alpha(A, b, a, L) for a in grid])
+    idx = np.where(vals < n)[0]
+    if idx.size == 0:
+        return float(grid[-1])
+    j = int(idx[-1])
+    if j >= len(grid) - 1:
+        return float(grid[-1])
+    try:
+        la = brentq(lambda t: _chi2_alpha(A, b, 10.0 ** t, L) - n,
+                     np.log10(grid[j]), np.log10(grid[j + 1]), xtol=1e-3)
+        return float(10.0 ** la)
+    except ValueError:
+        return float(grid[j])
+
+
+def quasi_optimality(A, b, alphas, L=None):
+    """Quasi-optimality criterion (Hochstenbach & Reichel, 2015).
+
+    Selects alpha minimising noise-dominated SVD components.
+    Does NOT require noise level estimate.
+    """
+    alphas = np.asarray(alphas, float)
+    U, sv, Vt = svd(A, full_matrices=False)
+    Ub = U.T @ b
+    qo_vals = np.empty(len(alphas))
+    for j, alpha in enumerate(alphas):
+        mask = sv ** 2 < alpha
+        if np.any(mask):
+            qo_vals[j] = float(np.sqrt(np.sum((Ub[mask] / sv[mask]) ** 2)))
+        else:
+            qo_vals[j] = 0.0
+    return float(alphas[int(np.argmin(qo_vals))]), qo_vals
+
+
+def ncp_criterion(A, b, alphas, L=None):
+    """Normalised Cumulative Periodogram (NCP) residual whiteness test.
+
+    Selects alpha where residual is closest to white noise (KS test).
+    """
+    alphas = np.asarray(alphas, float)
+    m = len(b)
+    ncp_vals = np.empty(len(alphas))
+    for j, alpha in enumerate(alphas):
+        x, _ = _lin_solve(A, b, alpha, L)
+        r = A @ x - b
+        R = np.fft.rfft(r)
+        I = np.abs(R) ** 2
+        I[0] = 0.0
+        I_sum = np.sum(I)
+        if I_sum < 1e-30:
+            ncp_vals[j] = 1.0
+            continue
+        cdf = np.cumsum(I) / I_sum
+        j_arr = np.arange(len(cdf))
+        ks = np.max(np.abs(cdf - j_arr / max(len(cdf) - 1, 1)))
+        ncp_vals[j] = float(ks)
+    return float(alphas[int(np.argmin(ncp_vals))]), ncp_vals
+
+
+def snr_criterion(A, b, alphas, L=None):
+    """Signal-to-Noise Ratio criterion.
+
+    Selects alpha maximising estimated SNR of the solution.
+    """
+    alphas = np.asarray(alphas, float)
+    m, n = A.shape
+    U, sv, Vt = svd(A, full_matrices=False)
+    Ub = U.T @ b
+    snr_vals = np.empty(len(alphas))
+    for j, alpha in enumerate(alphas):
+        x_norm2 = float(np.sum((Ub * sv / (sv ** 2 + alpha)) ** 2))
+        cov_tr = float(np.sum(1.0 / (sv ** 2 + alpha)))
+        x_svd = Vt.T @ (Ub * sv / (sv ** 2 + alpha))
+        r = A @ x_svd - b
+        sigma2 = float(r @ r) / max(m - n, 1)
+        snr_vals[j] = x_norm2 / max(sigma2 * cov_tr, 1e-30)
+    return float(alphas[int(np.argmax(snr_vals))]), snr_vals
+
+
+def gcv_weighted(A, b, alpha, L=None, sigma_data=None, n_probe=24, seed=0):
+    """Weighted GCV for heteroscedastic noise (Poisson)."""
+    if sigma_data is None:
+        return gcv_point(A, b, alpha, L, n_probe, seed)
+    w = 1.0 / (np.asarray(sigma_data, float) ** 2)
+    Aw = A * np.sqrt(w)[:, None]
+    bw = b * np.sqrt(w)
+    x, M = _lin_solve(Aw, bw, alpha, L)
+    r = Aw @ x - bw
+    n = len(b)
+    numer = float(r @ r)
+    rng = np.random.default_rng(seed)
+    V = rng.choice([-1.0, 1.0], size=(n, n_probe))
+    HV = Aw @ np.linalg.solve(M, Aw.T @ V)
+    tr = float(np.mean(np.sum(V * (V - HV), axis=0)))
+    denom = max(tr, 1e-12) ** 2
+    return float(n * numer / denom)
+
+
+def gcv_weighted_curve(A, b, alphas, L=None, sigma_data=None, **kw):
+    """Evaluate weighted GCV for a grid of alpha values."""
+    return np.array([gcv_weighted(A, b, a, L, sigma_data=sigma_data, **kw)
+                       for a in alphas])
+
+
+def lcurve_corner_iter(hist_residual, hist_solution_norm):
+    """L-curve corner for iterative methods (CGLS, Landweber)."""
+    r = np.asarray(hist_residual, float)
+    s = np.asarray(hist_solution_norm, float)
+    eps = 1e-300
+    lr = np.log(np.maximum(r, eps))
+    ls = np.log(np.maximum(s, eps))
+    n = len(lr)
+    kappa = np.zeros(n)
+    for j in range(1, n - 1):
+        kappa[j] = _menger_curvature(
+            (lr[j - 1], ls[j - 1]),
+            (lr[j], ls[j]),
+            (lr[j + 1], ls[j + 1]))
+    return int(np.argmax(kappa)), kappa

@@ -1,1 +1,295 @@
-"""Bayesian inversion methods for Fredholm depth profiling.Provides:    - Ensemble Kalman Inversion (EKI): fast derivative-free UQ    - Laplace approximation MAP with posterior covariance    - Prior construction helpers (GP kernel, multi-layer priors)The Ensemble Kalman Inversion (Iglesias et al. 2013) approximates theBayesian posterior without MCMC by running an ensemble of model realisationsthrough the forward model and applying Kalman updates.  Much faster thanMCMC (seconds vs hours) while providing uncertainty bands.The Laplace approximation finds the MAP estimate via Tikhonov regularisation(equivalent to Gaussian prior + Gaussian likelihood) and computes theposterior covariance from the Hessian.References----------    Iglesias et al. (2013) SIAM J. Numer. Anal. — EKI theory.    Laby et al. (2025) Nature Sci. Rep. — regularised EKI for geophysics.    Tso et al. (2024) GJI 236(3):1877 — EKI for IP inversion.    Hasan et al. (2023) J. Env. Radioact. 262:107316 — Bayesian gamma inversion."""from __future__ import division, print_function, absolute_importimport numpy as npdef ensemble_kalman_inversion(K, d, sigma=None, n_ens=200, n_iter=30,                               prior_std=1e4, prior_mean=None,                               seed=0, nonneg=True, alpha_reg=0.0):    """Ensemble Kalman Inversion (EKI) for Fredholm depth inversion.    Approximates the Bayesian posterior p(a | d) using an ensemble    of model realisations updated via the Kalman filter equations.    At each iteration k:        1. Forward: d_j^k = K @ a_j^k  for each ensemble member j        2. Compute ensemble statistics: C_m, C_md, C_d        3. Kalman update: a_j^{k+1} = a_j^k + C_md @ C_d^{-1} @ (d_obs + eps_j - d_j^k)    The ensemble {a_j^K} approximates samples from p(a | d).    Posterior mean = ensemble mean.    Posterior covariance = ensemble covariance.    The regularised variant (Laby et al. 2025) adds alpha*I to C_d    and C_md to prevent ensemble collapse.    Parameters    ----------    K : array-like (m, n)        Forward kernel matrix.    d : array-like (m,)        Observed data (count rates).    sigma : array-like (m,) or None        Data uncertainties.  If None, unit weights.    n_ens : int        Number of ensemble members.  Default 200.        Larger = better UQ but slower.  Minimum ~50.    n_iter : int        Maximum EKI iterations.  Default 30.        For linear problems, converges in ~10-15 iterations.    prior_std : float or array-like (n,)        Prior standard deviation.  If scalar, same for all layers.        Default 1e4 Bq/m^3.    prior_mean : array-like (n,) or None        Prior mean.  Default: zero.    seed : int        Random seed for reproducibility.    nonneg : bool        Clip ensemble members to non-negative after each update.    alpha_reg : float        Regularisation to prevent ensemble collapse.        Default 0 (no regularisation).    Returns    -------    dict with keys:        'mean' : ndarray (n,)            Posterior mean estimate.        'std' : ndarray (n,)            Posterior standard deviation (1-sigma uncertainty).        'ensemble' : ndarray (n_ens, n)            Full ensemble of posterior samples.        'chi2_history' : ndarray (n_iter,)            Data misfit at each iteration.    """    K = np.asarray(K, float)    d = np.asarray(d, float)    m_dim, n = K.shape    # Data covariance    if sigma is not None:        C_dd = np.diag(np.asarray(sigma, float) ** 2)    else:        C_dd = np.eye(m_dim)    rng = np.random.default_rng(seed)    # Prior: N(prior_mean, diag(prior_std^2))    if prior_mean is None:        prior_mean = np.zeros(n)    else:        prior_mean = np.asarray(prior_mean, float)    if np.isscalar(prior_std):        prior_std = np.full(n, float(prior_std))    else:        prior_std = np.asarray(prior_std, float)    # Initialise ensemble from prior    ensemble = rng.normal(prior_mean[None, :], prior_std[None, :], size=(n_ens, n))    if nonneg:        ensemble = np.maximum(ensemble, 0.0)    chi2_hist = []    for it in range(n_iter):        # Forward model        D = (K @ ensemble.T).T  # (n_ens, m)        # Ensemble statistics        m_bar = np.mean(ensemble, axis=0)        d_bar = np.mean(D, axis=0)        # Anomalies (centred)        A_ens = ensemble - m_bar[None, :]       # (n_ens, n)        D_ens = D - d_bar[None, :]               # (n_ens, m)        # Cross-covariance and data covariance (low-rank)        C_md = (A_ens.T @ D_ens) / (n_ens - 1)    # (n, m)        C_d = (D_ens.T @ D_ens) / (n_ens - 1) + C_dd  # (m, m)        # Add regularisation (Laby et al. 2025)        if alpha_reg > 0:            C_d += alpha_reg * np.eye(m_dim)            C_md += alpha_reg * np.eye(min(n, m_dim))[:n, :m_dim]        # Kalman gain: K_gain = C_md @ C_d^{-1}        try:            K_gain = C_md @ np.linalg.solve(C_d, np.eye(m_dim))        except np.linalg.LinAlgError:            # Fallback: regularise more            C_d += 1e-6 * np.eye(m_dim)            K_gain = C_md @ np.linalg.solve(C_d, np.eye(m_dim))        # Perturbation for inflation        eps = rng.multivariate_normal(np.zeros(m_dim), C_dd, size=n_ens)        # Update each ensemble member        innovation = (d[None, :] + eps - D)  # (n_ens, m)        ensemble = ensemble + (innovation @ K_gain.T)  # (n_ens, n)        if nonneg:            ensemble = np.maximum(ensemble, 0.0)        # Record misfit        D_new = (K @ ensemble.T).T        r = D_new - d[None, :]        chi2_hist.append(float(np.mean(np.sum(r ** 2, axis=1))))    # Posterior statistics    post_mean = np.mean(ensemble, axis=0)    post_std = np.std(ensemble, axis=0)    return {        "mean": post_mean,        "std": post_std,        "ensemble": ensemble,        "chi2_history": np.array(chi2_hist),        "iterations": n_iter,    }def laplace_map(K, d, sigma=None, alpha=1.0, L=None, nonneg=True,                prior_mean=None):    """Laplace approximation: MAP estimate + posterior covariance.    For a Gaussian prior p(a) ~ N(a0, (alpha L^T L)^{-1}) and    Gaussian likelihood p(d|a) ~ N(Ka, diag(sigma^2)), the MAP is    the Tikhonov solution:        a_MAP = (K^T K + alpha L^T L)^{-1} K^T d    (with a0 adjustment).    The posterior covariance is:        Cov_post = (K^T K + alpha L^T L)^{-1}    This is equivalent to the Bayesian interpretation of Tikhonov    regularisation.  Provides uncertainty quantification at minimal    computational cost (just one linear system solve + one matrix    inversion).    Parameters    ----------    K : array-like (m, n)    d : array-like (m,)    sigma : array-like (m,) or None    alpha : float        Prior precision (1/prior_variance).  Higher = more regularisation.    L : array-like (p, n) or None        Prior precision operator.  Default: identity.    nonneg : bool        Solve with non-negativity constraint (NNLS).        Note: covariance formula is for unconstrained case.    prior_mean : array-like (n,) or None        Prior mean.  Default: zero.    Returns    -------    dict with keys:        'map' : ndarray (n,)            Maximum a posteriori estimate.        'std' : ndarray (n,)            Posterior standard deviation (1-sigma).        'cov' : ndarray (n, n)            Full posterior covariance matrix.        'alpha' : float            Regularisation parameter used.    """    A, b = _weighted(K, d, sigma)    n = A.shape[1]    L = np.eye(n) if L is None else L    a0 = np.zeros(n) if prior_mean is None else np.asarray(prior_mean, float)    # Hessian of -log posterior    M = A.T @ A + alpha * (L.T @ L)    # MAP estimate    if nonneg:        from .solvers import _tikhonov_weighted        a_map = _tikhonov_weighted(A, b, alpha, L=L, x0=a0, nonneg=True)    else:        a_map = np.linalg.solve(M, A.T @ b + alpha * L.T @ L @ a0)    # Posterior covariance    try:        cov = np.linalg.inv(M)    except np.linalg.LinAlgError:        cov = np.linalg.pinv(M)    a_std = np.sqrt(np.clip(np.diag(cov), 0, None))    return {        "map": a_map,        "std": a_std,        "cov": cov,        "alpha": alpha,    }def gp_prior_covariance(z, sigma_f=1e4, length_scale=0.1, sigma_n=0.0):    """Squared-exponential (RBF) Gaussian Process prior covariance.    K_ij = sigma_f^2 * exp(-||z_i - z_j||^2 / (2 * l^2)) + sigma_n^2 * delta_ij    This prior encodes smoothness: adjacent depth layers    are correlated with correlation length `length_scale`.    Reference: Hasan et al. (2023) J. Env. Radioact. 262:107316.    Parameters    ----------    z : array-like (n,)        Depth grid [m].    sigma_f : float        Prior standard deviation [Bq/m^3].    length_scale : float        Correlation length [m].    sigma_n : float        Nugget (diagonal noise).  Default 0.    Returns    -------    C : ndarray (n, n)        Prior covariance matrix.    """    z = np.asarray(z, float)    sq_dist = (z[:, None] - z[None, :]) ** 2    C = sigma_f ** 2 * np.exp(-sq_dist / (2.0 * length_scale ** 2))    if sigma_n > 0:        C += sigma_n ** 2 * np.eye(len(z))    return Cdef _weighted(K, d, sigma):    """Apply data weights w = 1/sigma (or w=1 if sigma is None)."""    K = np.asarray(K, float)    d = np.asarray(d, float)    if sigma is None:        return K.copy(), d.copy()    w = 1.0 / np.asarray(sigma, float)    return K * w[:, None], d * w
+"""Bayesian inversion methods for Fredholm depth profiling.
+
+Provides:
+    - Ensemble Kalman Inversion (EKI): fast derivative-free UQ
+    - Laplace approximation MAP with posterior covariance
+    - Prior construction helpers (GP kernel, multi-layer priors)
+
+The Ensemble Kalman Inversion (Iglesias et al. 2013) approximates the
+Bayesian posterior without MCMC by running an ensemble of model realisations
+through the forward model and applying Kalman updates.  Much faster than
+MCMC (seconds vs hours) while providing uncertainty bands.
+
+The Laplace approximation finds the MAP estimate via Tikhonov regularisation
+(equivalent to Gaussian prior + Gaussian likelihood) and computes the
+posterior covariance from the Hessian.
+
+References
+----------
+    Iglesias et al. (2013) SIAM J. Numer. Anal. — EKI theory.
+    Laby et al. (2025) Nature Sci. Rep. — regularised EKI for geophysics.
+    Tso et al. (2024) GJI 236(3):1877 — EKI for IP inversion.
+    Hasan et al. (2023) J. Env. Radioact. 262:107316 — Bayesian gamma inversion.
+"""
+
+from __future__ import division, print_function, absolute_import
+
+import numpy as np
+
+
+def ensemble_kalman_inversion(K, d, sigma=None, n_ens=200, n_iter=30,
+                               prior_std=1e4, prior_mean=None,
+                               seed=0, nonneg=True, alpha_reg=0.0):
+    """Ensemble Kalman Inversion (EKI) for Fredholm depth inversion.
+
+    Approximates the Bayesian posterior p(a | d) using an ensemble
+    of model realisations updated via the Kalman filter equations.
+
+    At each iteration k:
+        1. Forward: d_j^k = K @ a_j^k  for each ensemble member j
+        2. Compute ensemble statistics: C_m, C_md, C_d
+        3. Kalman update: a_j^{k+1} = a_j^k + C_md @ C_d^{-1} @ (d_obs + eps_j - d_j^k)
+
+    The ensemble {a_j^K} approximates samples from p(a | d).
+    Posterior mean = ensemble mean.
+    Posterior covariance = ensemble covariance.
+
+    The regularised variant (Laby et al. 2025) adds alpha*I to C_d
+    and C_md to prevent ensemble collapse.
+
+    Parameters
+    ----------
+    K : array-like (m, n)
+        Forward kernel matrix.
+    d : array-like (m,)
+        Observed data (count rates).
+    sigma : array-like (m,) or None
+        Data uncertainties.  If None, unit weights.
+    n_ens : int
+        Number of ensemble members.  Default 200.
+        Larger = better UQ but slower.  Minimum ~50.
+    n_iter : int
+        Maximum EKI iterations.  Default 30.
+        For linear problems, converges in ~10-15 iterations.
+    prior_std : float or array-like (n,)
+        Prior standard deviation.  If scalar, same for all layers.
+        Default 1e4 Bq/m^3.
+    prior_mean : array-like (n,) or None
+        Prior mean.  Default: zero.
+    seed : int
+        Random seed for reproducibility.
+    nonneg : bool
+        Clip ensemble members to non-negative after each update.
+    alpha_reg : float
+        Regularisation to prevent ensemble collapse.
+        Default 0 (no regularisation).
+
+    Returns
+    -------
+    dict with keys:
+        'mean' : ndarray (n,)
+            Posterior mean estimate.
+        'std' : ndarray (n,)
+            Posterior standard deviation (1-sigma uncertainty).
+        'ensemble' : ndarray (n_ens, n)
+            Full ensemble of posterior samples.
+        'chi2_history' : ndarray (n_iter,)
+            Data misfit at each iteration.
+    """
+    K = np.asarray(K, float)
+    d = np.asarray(d, float)
+    m_dim, n = K.shape
+
+    # Data covariance
+    if sigma is not None:
+        C_dd = np.diag(np.asarray(sigma, float) ** 2)
+    else:
+        C_dd = np.eye(m_dim)
+
+    rng = np.random.default_rng(seed)
+
+    # Prior: N(prior_mean, diag(prior_std^2))
+    if prior_mean is None:
+        prior_mean = np.zeros(n)
+    else:
+        prior_mean = np.asarray(prior_mean, float)
+
+    if np.isscalar(prior_std):
+        prior_std = np.full(n, float(prior_std))
+    else:
+        prior_std = np.asarray(prior_std, float)
+
+    # Initialise ensemble from prior
+    ensemble = rng.normal(prior_mean[None, :], prior_std[None, :], size=(n_ens, n))
+    if nonneg:
+        ensemble = np.maximum(ensemble, 0.0)
+
+    chi2_hist = []
+    for it in range(n_iter):
+        # Forward model
+        D = (K @ ensemble.T).T  # (n_ens, m)
+
+        # Ensemble statistics
+        m_bar = np.mean(ensemble, axis=0)
+        d_bar = np.mean(D, axis=0)
+
+        # Anomalies (centred)
+        A_ens = ensemble - m_bar[None, :]       # (n_ens, n)
+        D_ens = D - d_bar[None, :]               # (n_ens, m)
+
+        # Cross-covariance and data covariance (low-rank)
+        C_md = (A_ens.T @ D_ens) / (n_ens - 1)    # (n, m)
+        C_d = (D_ens.T @ D_ens) / (n_ens - 1) + C_dd  # (m, m)
+
+        # Add regularisation (Laby et al. 2025)
+        if alpha_reg > 0:
+            C_d += alpha_reg * np.eye(m_dim)
+            C_md += alpha_reg * np.eye(min(n, m_dim))[:n, :m_dim]
+
+        # Kalman gain: K_gain = C_md @ C_d^{-1}
+        try:
+            K_gain = C_md @ np.linalg.solve(C_d, np.eye(m_dim))
+        except np.linalg.LinAlgError:
+            # Fallback: regularise more
+            C_d += 1e-6 * np.eye(m_dim)
+            K_gain = C_md @ np.linalg.solve(C_d, np.eye(m_dim))
+
+        # Perturbation for inflation
+        eps = rng.multivariate_normal(np.zeros(m_dim), C_dd, size=n_ens)
+
+        # Update each ensemble member
+        innovation = (d[None, :] + eps - D)  # (n_ens, m)
+        ensemble = ensemble + (innovation @ K_gain.T)  # (n_ens, n)
+
+        if nonneg:
+            ensemble = np.maximum(ensemble, 0.0)
+
+        # Record misfit
+        D_new = (K @ ensemble.T).T
+        r = D_new - d[None, :]
+        chi2_hist.append(float(np.mean(np.sum(r ** 2, axis=1))))
+
+    # Posterior statistics
+    post_mean = np.mean(ensemble, axis=0)
+    post_std = np.std(ensemble, axis=0)
+
+    return {
+        "mean": post_mean,
+        "std": post_std,
+        "ensemble": ensemble,
+        "chi2_history": np.array(chi2_hist),
+        "iterations": n_iter,
+    }
+
+
+def laplace_map(K, d, sigma=None, alpha=1.0, L=None, nonneg=True,
+                prior_mean=None):
+    """Laplace approximation: MAP estimate + posterior covariance.
+
+    For a Gaussian prior p(a) ~ N(a0, (alpha L^T L)^{-1}) and
+    Gaussian likelihood p(d|a) ~ N(Ka, diag(sigma^2)), the MAP is
+    the Tikhonov solution:
+
+        a_MAP = (K^T K + alpha L^T L)^{-1} K^T d
+
+    (with a0 adjustment).
+
+    The posterior covariance is:
+
+        Cov_post = (K^T K + alpha L^T L)^{-1}
+
+    This is equivalent to the Bayesian interpretation of Tikhonov
+    regularisation.  Provides uncertainty quantification at minimal
+    computational cost (just one linear system solve + one matrix
+    inversion).
+
+    Parameters
+    ----------
+    K : array-like (m, n)
+    d : array-like (m,)
+    sigma : array-like (m,) or None
+    alpha : float
+        Prior precision (1/prior_variance).  Higher = more regularisation.
+    L : array-like (p, n) or None
+        Prior precision operator.  Default: identity.
+    nonneg : bool
+        Solve with non-negativity constraint (NNLS).
+        Note: covariance formula is for unconstrained case.
+    prior_mean : array-like (n,) or None
+        Prior mean.  Default: zero.
+
+    Returns
+    -------
+    dict with keys:
+        'map' : ndarray (n,)
+            Maximum a posteriori estimate.
+        'std' : ndarray (n,)
+            Posterior standard deviation (1-sigma).
+        'cov' : ndarray (n, n)
+            Full posterior covariance matrix.
+        'alpha' : float
+            Regularisation parameter used.
+    """
+    A, b = _weighted(K, d, sigma)
+    n = A.shape[1]
+    L = np.eye(n) if L is None else L
+    a0 = np.zeros(n) if prior_mean is None else np.asarray(prior_mean, float)
+
+    # Hessian of -log posterior
+    M = A.T @ A + alpha * (L.T @ L)
+
+    # MAP estimate
+    if nonneg:
+        from .solvers import _tikhonov_weighted
+        a_map = _tikhonov_weighted(A, b, alpha, L=L, x0=a0, nonneg=True)
+    else:
+        a_map = np.linalg.solve(M, A.T @ b + alpha * L.T @ L @ a0)
+
+    # Posterior covariance
+    try:
+        cov = np.linalg.inv(M)
+    except np.linalg.LinAlgError:
+        cov = np.linalg.pinv(M)
+
+    a_std = np.sqrt(np.clip(np.diag(cov), 0, None))
+
+    return {
+        "map": a_map,
+        "std": a_std,
+        "cov": cov,
+        "alpha": alpha,
+    }
+
+
+def gp_prior_covariance(z, sigma_f=1e4, length_scale=0.1, sigma_n=0.0):
+    """Squared-exponential (RBF) Gaussian Process prior covariance.
+
+    K_ij = sigma_f^2 * exp(-||z_i - z_j||^2 / (2 * l^2)) + sigma_n^2 * delta_ij
+
+    This prior encodes smoothness: adjacent depth layers
+    are correlated with correlation length `length_scale`.
+
+    Reference: Hasan et al. (2023) J. Env. Radioact. 262:107316.
+
+    Parameters
+    ----------
+    z : array-like (n,)
+        Depth grid [m].
+    sigma_f : float
+        Prior standard deviation [Bq/m^3].
+    length_scale : float
+        Correlation length [m].
+    sigma_n : float
+        Nugget (diagonal noise).  Default 0.
+
+    Returns
+    -------
+    C : ndarray (n, n)
+        Prior covariance matrix.
+    """
+    z = np.asarray(z, float)
+    sq_dist = (z[:, None] - z[None, :]) ** 2
+    C = sigma_f ** 2 * np.exp(-sq_dist / (2.0 * length_scale ** 2))
+    if sigma_n > 0:
+        C += sigma_n ** 2 * np.eye(len(z))
+    return C
+
+
+def _weighted(K, d, sigma):
+    """Apply data weights w = 1/sigma (or w=1 if sigma is None)."""
+    K = np.asarray(K, float)
+    d = np.asarray(d, float)
+    if sigma is None:
+        return K.copy(), d.copy()
+    w = 1.0 / np.asarray(sigma, float)
+    return K * w[:, None], d * w
