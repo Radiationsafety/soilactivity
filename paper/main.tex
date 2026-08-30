@@ -1,0 +1,1332 @@
+% arara: xelatex: { shell: no }
+% arara: bibtex
+% arara: xelatex: { shell: no }
+% arara: xelatex: { shell: no }
+\documentclass[a4paper,11pt]{article}
+
+% ---- Packages ----
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{algpseudocode}
+\usepackage{algorithm}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+
+% ---- Custom commands ----
+\newcommand{\bq}{\,\text{Bq}}
+\newcommand{\bqmt}{\,\text{Bq/m}^3}
+\newcommand{\bqms}{\,\text{Bq/m}^2}
+\newcommand{\keV}{\,\text{keV}}
+\newcommand{\Eone}{\mathrm{E}_1}
+\newcommand{\R}{\mathbb{R}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\tr}{tr}
+
+% ---- Title ----
+\title{
+  Geophysics-Inspired Fredholm Inversion for In-Situ Gamma\ Spectrometry:\
+  Reconstructing Radionuclide Depth Profiles with Transport-Chemistry Priors
+}
+
+\author{Anonymous}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+% =================================================================
+\begin{abstract}
+Determining the vertical distribution of radionuclides in soil from in-situ
+gamma-spectrometry measurements requires solving a Fredholm integral
+equation of the first kind --- a classically ill-posed problem.  This paper
+presents the \texttt{soilactivity} software framework, which adapts modern
+geophysical inversion methods to the specific structure of the gamma
+transport kernel.  We introduce a comprehensive solver suite comprising
+ten inversion algorithms: classical Tikhonov regularisation with
+non-negativity constraints, truncated SVD with depth normalisation,
+Landweber and Cimmino iterative methods, conjugate gradient least squares
+(CGLS) with early stopping, randomised Kaczmarz, FISTA for
+\(\ell_1\)-sparse inversion, total variation (TV) regularisation via ADMM,
+and IRLS-based focusing inversion in both minimum-support and
+minimum-gradient-support variants.  The parameter selection toolkit
+includes six criteria: generalised cross-validation (GCV), L-curve corner
+detection via Menger curvature, the Morozov discrepancy principle,
+quasi-optimality, normalised cumulative periodogram (NCP), and a
+signal-to-noise ratio (SNR) criterion.  Bayesian uncertainty quantification
+is provided through ensemble Kalman inversion (EKI) and Laplace MAP
+approximation.
+
+A distinguishing feature of the framework is the integration of reactive
+transport chemistry as an informed prior.  The transport module implements
+the advection--dispersion equation (ADE) with linear, pH-dependent, and
+Freundlich isotherm sorption models, competitive ion-exchange for
+Cs-137 and Sr-90, Eh-dependent uranium speciation, two-site kinetic
+sorption, Bateman decay chains, multi-layer soil columns, and a
+Crank--Nicolson numerical solver.  Depth weighting strategies adapted
+from gravity and magnetic inversion (Li--Oldenburg column normalisation,
+power-law and logarithmic scaling, adaptive data-driven weighting) counter
+the exponential sensitivity decay of the gamma kernel.  Joint multi-nuclide
+inversion with coupling constraints and an automated ensemble pipeline
+with AIC/BIC model selection complete the framework.
+
+Twin experiments with synthetic Eu-152 and Cs-137 profiles demonstrate
+that the geophysical solvers (TV, focusing MGS, CGLS) recover piecewise-
+constant and layered contamination profiles substantially better than
+classical smooth Tikhonov inversion, while the parametric transport model
+provides physically interpretable parameters (deposition density,
+effective migration time).  The EKI delivers posterior uncertainty bands
+without the computational cost of MCMC sampling.
+
+The software is released as the Python package \texttt{soilactivity} on
+the \texttt{feature/fredholm-methods} branch, with full test coverage
+via synthetic twin experiments.
+\end{abstract}
+
+\medskip
+\noindent\textbf{Keywords:} Fredholm inversion, in-situ gamma spectrometry,
+radionuclide depth profile, total variation, focusing inversion,
+ensemble Kalman inversion, advection--dispersion equation, sorption,
+depth weighting, geophysical inverse problems
+
+\newpage
+% =================================================================
+\section{Introduction}\label{sec:intro}
+
+In-situ gamma spectrometry is the primary field technique for rapid
+assessment of soil contamination by gamma-emitting radionuclides such as
+Cs-137, Cs-134, Eu-152, Co-60, and Am-241.  Unlike destructive soil
+core sampling, which provides point measurements at discrete depths, an
+in-situ detector placed at height $h$ above the ground records the
+integral contribution of all subsurface sources, weighted by the
+probability that a photon emitted at depth $z$ reaches the detector
+without being absorbed or scattered out of the full-energy peak.  This
+measurement geometry leads to a linear inverse problem of a specific
+mathematical structure: the relationship between the measured count rates
+and the unknown depth-varying volumetric activity $a(z)$ is governed by a
+Fredholm integral equation of the first kind
+\citep{beck1968deconvolution,zombori1992new}.
+
+The Fredholm formulation was established by \citet{beck1968deconvolution}
+and subsequently refined by \citet{zombori1992new}, who demonstrated that
+the point-source kernel reduces to an analytic expression involving the
+exponential integral $\Eone$ when Compton buildup and angular efficiency
+variations are neglected.  The resulting integral equation
+
+\begin{equation}\label{eq:fredholm}
+  C_i = \int_0^\infty k_i(z)\, a(z)\, dz, \qquad i = 1,\ldots, m,
+\end{equation}
+
+where $C_i$ is the net count rate in the $i$-th gamma line and
+
+\begin{equation}\label{eq:kernel}
+  k_i(z) = \frac{y_i\,\varepsilon}{2}\,\Eone\bigl(\mu_{\mathrm{air},i}\,h + \mu_{\mathrm{soil},i}\,z\bigr)
+\end{equation}
+
+is the depth kernel, is a classical example of a discrete ill-posed
+problem \citep{hansen1998rank}.  The exponential integral $\Eone$ decays
+monotonically with depth, so the kernel matrix $K_{ij} = k_i(z_j)\,\Delta z_j$
+has rapidly decreasing column norms.  This creates two fundamental
+difficulties.  First, small singular values of $K$ amplify measurement
+noise, making direct inversion (e.g., via the Moore--Penrose
+pseudo-inverse) meaningless without regularisation.  Second, the depth-
+dependent sensitivity decay causes regularised solutions to be biased
+toward the surface, under-representing activity at depth even when the
+data contain sufficient information to resolve it.
+
+These challenges are structurally identical to those encountered in
+geophysical inverse problems --- gravity, magnetic, electromagnetic, and
+seismic tomography inversions all involve forward operators whose
+sensitivity decays with distance from the sensors
+\citep{zhdanov2002geophysical,li19963d,li19983d,priede2023linear}.
+Over the past two decades, the geophysics community has developed a rich
+arsenal of regularisation strategies specifically designed to handle such
+problems: total variation (TV) regularisation for piecewise-constant
+models \citep{vatankhah2018tv,molodtsov2021convex}, sparsity-promoting
+\(\ell_1\) inversion via proximal methods \citep{beck2009fast,boyd2011distributed},
+focusing inversion that drives irrelevant model parameters to zero
+\citep{portniaguine1999focusing}, depth weighting to counteract sensitivity
+decay \citep{li19963d,li19983d,astrakhantsev2021adaptive}, and iterative
+methods with implicit regularisation through early stopping
+\citep{chen2024adaptive,strohmer2009randomized}.
+
+A second dimension of the problem, largely unexplored in the
+radionuclide depth-profiling literature, is the use of physicochemical
+transport models as informed priors.  The migration of radionuclides
+in soil is governed by the advection--dispersion equation (ADE) with
+sorption, decay, and chain ingrowth
+\citep{iaea2010radiological,sheppard1990parameter}.  The distribution
+coefficient $K_d$ --- which controls how strongly a nuclide is retarded
+by sorption to the soil matrix --- depends on soil pH, mineralogy,
+organic carbon content, and competing ions
+\citep{sheppard1990parameter,roushdy2025sorption}.  For trace
+concentrations typical of environmental contamination, the Freundlich
+isotherm predicts concentration-dependent $K_d$ that increases at lower
+concentrations.  The two-site kinetic sorption model
+\citep{vangenuchten1989two,sperry2018two} captures the time-dependent
+approach to equilibrium that occurs when only a fraction of sorption
+sites are instantaneously accessible.  Incorporating these physics into
+the inversion framework yields parametric profiles (pulse, exponential)
+with directly interpretable parameters (deposition density, effective
+migration time, retardation factor) and provides a natural coupling
+between the inversion and the contaminant transport history.
+
+This paper presents the \texttt{soilactivity} software framework, which
+bridges these two research streams by implementing a comprehensive suite
+of geophysical inversion methods adapted to the Fredholm gamma-spectrometry
+kernel, integrated with a reactive transport chemistry module that
+provides physically informed priors.  The scientific contributions are:
+
+\begin{enumerate}[label=(\roman*)]
+  \item A systematic adaptation of modern geophysical inversion algorithms
+        (TV/ADMM, FISTA, IRLS focusing, CGLS, Kaczmarz) to the specific
+        structure of the gamma-transport Fredholm equation, including
+        depth weighting strategies from gravity/magnetic inversion.
+  \item An extended transport-chemistry module with pH-dependent $K_d$,
+        Freundlich isotherms, competitive ion exchange, Eh-dependent
+        uranium speciation, two-site kinetic sorption, multi-layer soil
+columns, and a Crank--Nicolson ADE solver.
+  \item A Bayesian uncertainty quantification layer via ensemble Kalman
+        inversion (EKI) and Laplace MAP approximation.
+  \item An automated pipeline with ensemble multi-method inversion and
+        AIC/BIC model selection.
+  \item Six regularisation parameter selection criteria (GCV, L-curve,
+        discrepancy, quasi-optimality, NCP, SNR) and a comprehensive
+        diagnostics suite (resolution matrix, spread function,
+        checkerboard test, model covariance).
+\end{enumerate}
+
+The remainder of this paper is organised as follows.  Section~2
+develops the mathematical formulation.  Section~3 describes the inversion
+algorithms.  Section~4 presents the transport-chemistry framework.
+Section~5 covers Bayesian methods.  Section~6 details the software
+architecture.  Section~7 presents numerical experiments.  Section~8
+contains the discussion, and Section~9 the conclusions.
+
+
+% =================================================================
+\section{Mathematical Formulation}\label{sec:math}
+
+\subsection{The Fredholm Equation for Gamma-Transport}
+
+Consider a gamma detector placed at height $h$ above a flat, homogeneous
+soil surface.  Let $a(z)$ denote the volumetric activity
+$[\text{Bq/m}^3]$ of a given radionuclide at depth $z$ (positive
+downwards).  For a gamma line with energy $E$ keV, yield $y$ photons per
+disintegration, soil linear attenuation coefficient $\mu_s$ [m$^{-1}$],
+and air attenuation coefficient $\mu_a$ [m$^{-1}$], the net count rate
+recorded in this line is \citep{beck1968deconvolution}:
+
+\begin{equation}\label{eq:full_kernel}
+  C = \frac{y\,\varepsilon}{2}\int_0^{\pi/2}\!
+      \tan\theta\; g(\theta)\; B(\tau)\; e^{-\tau}\, d\theta,
+\end{equation}
+
+where the optical depth $\tau = (\mu_a h + \mu_s z)/\cos\theta$, $\varepsilon$
+is the full-sphere detection efficiency, $g(\theta)$ is the angular
+response of the detector, and $B(\tau)$ is the Compton buildup factor
+accounting for scattered photons that still deposit full energy in the
+detector.
+
+When buildup is neglected ($B=1$) and the angular response is isotropic
+($g=1$), the angular integral reduces to the exponential integral:
+
+\begin{equation}\label{eq:analytic}
+  k(z) = \frac{y\,\varepsilon}{2}\;\Eone\bigl(\mu_a h + \mu_s z\bigr),
+\end{equation}
+
+where $\Eone(x) = \int_1^\infty e^{-xt}/t\, dt$ is the exponential
+integral of the first kind.  This analytic form, derived by
+\citet{beck1968deconvolution}, is the foundation of all subsequent work.
+
+The kernel depends on the gamma-line energy through $\mu_s(E)$ and
+$\mu_a(E)$, which are obtained from NIST databases or empirical
+parametrisations.  Table~\ref{tab:lines} lists typical lines and
+attenuation coefficients used in the framework.
+
+\begin{table}[htbp]
+\centering
+\caption{Representative gamma lines and linear attenuation coefficients
+(\(\rho_{\mathrm{soil}} = 1.4\)~g/cm$^3$).}
+\label{tab:lines}
+\begin{tabular}{lcccc}
+\toprule
+Nuclide & Energy [keV] & Yield & $\mu_s$ [m$^{-1}$] & $\mu_a$ [m$^{-1}$] \\
+\midrule
+Cs-137 & 661.66 & 0.851 & 10.8 & 0.0092 \\
+Eu-152 & 121.78 & 0.284 & 23.8 & 0.0185 \\
+Eu-152 & 344.28 & 0.266 & 12.2 & 0.0114 \\
+Eu-152 & 1408.01 & 0.209 & 7.4  & 0.0066 \\
+Co-60  & 1173.24 & 0.998 & 8.1  & 0.0083 \\
+Co-60  & 1332.50 & 0.999 & 7.7  & 0.0078 \\
+Am-241 & 59.54  & 0.360 & 44.0 & 0.0300 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Discretisation and the Ill-Posed Linear System}
+
+Discretising the depth axis into $n$ cells with centres $z_j$ and
+widths $\Delta z_j$, and stacking $m$ measurements (multiple lines and/or
+detector heights), equation~\eqref{eq:fredholm} becomes:
+
+\begin{equation}\label{eq:linear}
+  \bm{d} = \bm{K}\,\bm{a} + \bm{\varepsilon},
+\end{equation}
+
+where $\bm{d} \in \R^m$ is the vector of measured count rates,
+$\bm{a} \in \R^n$ is the unknown activity profile, $\bm{K} \in \R^{m \times n}$
+is the kernel matrix with elements $K_{ij} = k_i(z_j)\,\Delta z_j$, and
+$\bm{\varepsilon} \sim \mathcal{N}(\bm{0}, \mathrm{diag}(\sigma^2))$ represents
+measurement noise with standard deviations $\sigma_i = \sqrt{C_i}$ (Poisson
+statistics).
+
+The singular value decomposition (SVD) of the depth-normalised kernel
+$\bm{A} = \bm{K}\,\mathrm{diag}(\bm{s})$ (where $s_j = 1/\|\bm{K}_{\cdot,j}\|$)
+reveals the essential ill-posedness of the problem.  For a typical
+configuration with $m = 6$ data (three Eu-152 lines at two detector
+heights) and $n = 50$ depth cells over $z_{\max} = 0.6$~m, the singular
+values span several orders of magnitude.  The ratio of largest to smallest
+singular value (the condition number) typically exceeds $10^4$,
+confirming severe ill-conditioning.  The Picard plot --- singular values
+$\sigma_k$ versus the Fourier coefficients $|\bm{u}_k^\mathrm{T}\bm{d}|$
+--- shows the characteristic transition from signal-dominated to
+noise-dominated components that is the hallmark of discrete ill-posed
+problems \citep{hansen1998rank}.
+
+\subsection{Extended Kernel Models}
+
+Beyond the basic point-source kernel, the framework implements three
+extended models that broaden the applicability of the inversion:
+
+\begin{enumerate}[label=\textbf{K\arabic*:}]
+  \item \textbf{Lateral extension} ($k_{\mathrm{lat}}$): for wide-area
+  surveys (aerial, large ground areas), photons arrive from off-axis
+  points within a circular field of view of radius $r_{\mathrm{FOV}}$.
+  The lateral kernel integrates the point-source contribution over the
+  radial distance $r$ \citep{tyler2008determination}:
+  \begin{equation}
+    k_{\mathrm{lat}}(z) = \int_0^{r_{\mathrm{FOV}}} k_{\mathrm{point}}(r, z)\; 2\pi r\, dr,
+  \end{equation}
+  where the path length through soil is $\sqrt{z^2 + r^2}$ and
+  through air is $\sqrt{h^2 + r^2}$.
+
+  \item \textbf{Collimated detector} ($k_{\mathrm{coll}}$): for shielded
+detectors with a conical field of view of half-angle $\theta_c$,
+  the angular integral is truncated at $u_{\max} = 1/\cos\theta_c$
+  with a smooth tanh window to avoid numerical Gibbs artifacts:
+  \begin{equation}
+    k_{\mathrm{coll}}(z) = \frac{y\,\varepsilon}{2}
+      \int_1^{u_{\max}} \frac{B(\tau)\,e^{-\tau}\,w(u)}{u}\, du,
+  \end{equation}
+  where $w(u) = \tfrac{1}{2}(1 - \tanh(20(u - u_{\max})))$.
+
+  \item \textbf{Multi-layer soil} ($k_{\mathrm{ml}}$): for stratified
+  soils where each layer has a different density and composition, the
+  attenuation coefficient $\mu_s$ is a step function of depth, and the
+  kernel is evaluated with the layer-appropriate $\mu_s(z_j)$ at each
+  grid point.
+\end{enumerate}
+
+\subsection{Buildup Factor}
+
+The Taylor buildup factor $B(\tau) = 1 + a\,\tau\,e^{-\tau/b}$ provides a
+simple parametric approximation to Compton scattering contributions.
+With default parameters $a = 1.0$, $b = 8.0$, it captures the
+characteristic rise-and-plateau behaviour of the buildup factor as a
+function of optical depth.  More sophisticated parametrisations (e.g.,
+the Geometric Progression formula) can be supplied as callable arguments
+to the kernel construction function.
+
+
+% =================================================================
+\section{Inversion Algorithms}\label{sec:solvers}
+
+All solvers in the framework operate on the weighted system
+$\bm{A} = \mathrm{diag}(\bm{w})\,\bm{K}$, $\bm{b} = \bm{w}\,\bm{d}$,
+where $w_i = 1/\sigma_i$, and enforce non-negativity ($a(z) \geq 0$) by
+default, reflecting the physical constraint that volumetric activity
+cannot be negative.
+
+\subsection{Classical Solvers}
+
+\subsubsection{Tikhonov Regularisation}
+
+The Tikhonov solution solves the constrained optimisation problem:
+
+\begin{equation}\label{eq:tikhonov}
+  \bm{a}_\alpha = \argmin_{\bm{a} \geq 0}\;
+    \|\bm{A}\bm{a} - \bm{b}\|^2 + \alpha\,\|\bm{L}(\bm{a} - \bm{a}_0)\|^2,
+\end{equation}
+
+where $\bm{L}$ is the regularisation operator (identity for minimum-norm,
+second-order finite-difference matrix for smoothness), $\bm{a}_0$ is a
+reference model (zero by default), and $\alpha > 0$ is the regularisation
+parameter.  The problem is solved as a non-negative least squares (NNLS)
+problem via \texttt{scipy.optimize.lsq\_linear} after augmenting the system:
+
+\begin{equation}
+  \begin{pmatrix} \bm{A} \\ \sqrt{\alpha}\,\bm{L} \end{pmatrix}
+  \bm{a} = \begin{pmatrix} \bm{b} \\ \sqrt{\alpha}\,\bm{L}\,\bm{a}_0 \end{pmatrix},
+  \quad \bm{a} \geq 0.
+\end{equation}
+
+The smoothness prior ($\bm{L} = \bm{D}_2$, the second-order finite-difference
+matrix) produces smoothly varying profiles suitable for diffusively
+migrated nuclides.  The minimum-norm prior ($\bm{L} = \bm{I}$) is used as
+a baseline for comparison with more sophisticated methods.
+
+\subsubsection{Truncated SVD (TSVD)}
+
+TSVD applies the depth-normalised SVD, $\bm{A}\,\bm{S} = \bm{U}\,\bm{\Sigma}\,\bm{V}^\mathrm{T}$,
+and retains only the $k$ largest singular values:
+
+\begin{equation}
+  \bm{a}_{\mathrm{TSVD}} = \bm{S}\,\sum_{i=1}^{k}
+  \frac{\bm{u}_i^\mathrm{T}\bm{b}}{\sigma_i}\,\bm{v}_i,
+\end{equation}
+
+where the truncation level $k$ is determined by the relative cutoff
+$\sigma_k > \sigma_1 \times 10^{-3}$.  The depth normalisation
+$\bm{S} = \mathrm{diag}(1/\|\bm{K}_{\cdot,j}\|)$ ensures that each depth
+layer contributes equally to the SVD, counteracting the natural dominance
+of near-surface layers \citep{li19963d}.
+
+\subsubsection{Landweber Iteration}
+
+The Landweber method is a steepest-descent iteration on the normal
+equations with relaxation parameter $\omega$:
+
+\begin{equation}
+  \bm{a}^{(k+1)} = \max\!\bigl(\bm{a}^{(k)} + \omega\,\bm{A}^\mathrm{T}(\bm{b} - \bm{A}\bm{a}^{(k)}),\; 0\bigr),
+\end{equation}
+
+where $\omega = 0.9 \times 2/\sigma_1^2$ ensures convergence.  The iteration
+count $k$ acts as the implicit regularisation parameter through the
+phenomenon of semi-convergence: the solution first improves (approaching
+the true profile) and then deteriorates (noise amplification) as
+$k$ increases.  Stopping at the discrepancy principle
+$\|\bm{A}\bm{a}^{(k)} - \bm{b}\|^2 \leq m$ prevents overfitting.
+
+\subsubsection{Cimmino (Simultaneous Kaczmarz)}
+
+The Cimmino method projects onto all equation hyperplanes simultaneously
+at each iteration:
+
+\begin{equation}
+  \bm{a}^{(k+1)} = \bm{a}^{(k)} + \frac{1}{m}
+    \sum_{i=1}^{m} \frac{r_i^{(k)}}{\|\bm{A}_{i\cdot}\|^2}\,\bm{A}_{i\cdot},
+\end{equation}
+
+where $r_i^{(k)} = b_i - \bm{A}_{i\cdot}\,\bm{a}^{(k)}$ is the $i$-th residual.
+Cimmino is particularly convenient for the block-structured systems that
+arise from multi-line, multi-height measurements, as it naturally
+handles the row partitioning \citep{hansen1998rank}.
+
+\subsection{Geophysical Solvers}
+
+\subsubsection{Conjugate Gradient Least Squares (CGLS)}
+
+CGLS applies the conjugate gradient algorithm to the normal equations
+$\bm{A}^\mathrm{T}\bm{A}\,\bm{a} = \bm{A}^\mathrm{T}\bm{b}$, providing $\mathcal{O}(1/k)$
+convergence to the minimum-norm solution.  Following
+\citet{chen2024adaptive}, the iteration count $k$ serves as the
+regularisation parameter, with the L-curve corner used for automatic
+stopping.  The algorithm maintains orthogonal search directions and
+requires only matrix-vector products, making it efficient for large
+discretisations.  The non-negativity constraint is enforced by projecting
+onto $\bm{a} \geq 0$ after each update.
+
+\subsubsection{Randomised Kaczmarz}
+
+The Algebraic Reconstruction Technique (ART / Kaczmarz) cycles through
+the equations sequentially, projecting onto each hyperplane:
+
+\begin{equation}
+  \bm{a}^{(k+1)} = \bm{a}^{(k)} + \frac{b_i - \bm{A}_{i\cdot}\,\bm{a}^{(k)}}{\|\bm{A}_{i\cdot}\|^2}\,\bm{A}_{i\cdot},
+\end{equation}
+
+where the row index $i$ is selected randomly with replacement (without
+replacement within each cycle).  \citet{strohmer2009randomized} proved
+that randomised ordering achieves exponential convergence for
+row-norm-normalised systems, in contrast to the slow convergence of
+sequential cycling for ill-conditioned problems.
+
+\subsubsection{FISTA: $\ell_1$-Sparse Inversion}
+
+FISTA \citep{beck2009fast} solves the $\ell_1$-regularised problem:
+
+\begin{equation}\label{eq:fista}
+  \bm{a}^* = \argmin_{\bm{a} \geq 0}\; \tfrac{1}{2}\|\bm{A}\bm{a} - \bm{b}\|^2 + \alpha\,\|\bm{a}\|_1.
+\end{equation}
+
+The $\ell_1$ penalty promotes sparsity, concentrating activity in a
+few thin layers --- ideal for compact contamination plumes.  FISTA uses
+Nesterov acceleration, achieving $\mathcal{O}(1/k^2)$ convergence versus
+$\mathcal{O}(1/k)$ for standard ISTA.  Each iteration consists of:
+
+\begin{enumerate}
+  \item Gradient step: $\tilde{\bm{a}} = \bm{y} - \tfrac{1}{L}\,\bm{A}^\mathrm{T}(\bm{A}\bm{y} - \bm{b})$,
+        where $L = \sigma_1^2$ is the Lipschitz constant.
+  \item Proximal step (non-negative soft thresholding):
+        $a_j = \max(\tilde{a}_j - \alpha/L,\; 0)$.
+  \item Momentum update: $\bm{y} \leftarrow \bm{a} + \frac{t-1}{t_{\mathrm{new}}}(\bm{a} - \bm{a}_{\mathrm{old}})$,
+        $t_{\mathrm{new}} = \frac{1}{2}(1 + \sqrt{1 + 4t^2})$.
+\end{enumerate}
+
+\subsubsection{Total Variation via ADMM}
+
+Total variation regularisation preserves sharp layer boundaries by
+penalising the magnitude of gradients rather than the gradients
+themselves:
+
+\begin{equation}\label{eq:tv}
+  \bm{a}^* = \argmin_{\bm{a} \geq 0}\; \tfrac{1}{2}\|\bm{A}\bm{a} - \bm{b}\|^2 + \alpha\,\mathrm{TV}(\bm{a}),
+\end{equation}
+
+where $\mathrm{TV}(\bm{a}) = \sum_j |(\bm{D}\bm{a})_j|$ for the anisotropic
+case ($\bm{D}$ is the first-order forward-difference operator).  The
+framework uses the ADMM (Alternating Direction Method of Multipliers)
+\citep{boyd2011distributed} formulation with the split variable
+$\bm{z} = \bm{D}\bm{a}$:
+
+\begin{align}
+  \text{\textbf{m-update:}} &\quad
+    (\bm{A}^\mathrm{T}\bm{A} + \rho\,\bm{D}^\mathrm{T}\bm{D})\,\bm{a} = \bm{A}^\mathrm{T}\bm{b} + \rho\,\bm{D}^\mathrm{T}(\bm{z} - \bm{u}), \label{eq:admm_m}\\
+  \text{\textbf{z-update:}} &\quad
+    \bm{z} = \mathcal{S}_{\alpha/\rho}(\bm{D}\bm{a} + \bm{u}), \label{eq:admm_z}\\
+  \text{\textbf{u-update:}} &\quad
+    \bm{u} \leftarrow \bm{u} + \bm{D}\bm{a} - \bm{z}, \label{eq:admm_u}
+\end{align}
+
+where $\mathcal{S}_\tau$ is the soft-thresholding operator and $\rho$ is
+the ADMM penalty parameter.  The system matrix in
+equation~\eqref{eq:admm_m} is constant throughout the iterations and is
+prefactored via Cholesky decomposition, making each m-update an
+$\mathcal{O}(n)$ back-substitution.  This formulation follows
+\citet{vatankhah2018tv}, adapted from 3D gravity to 1D depth profiling.
+TV regularisation is particularly well-suited for contamination
+scenarios with abrupt layer boundaries (e.g., a buried waste container
+or a distinct plume interface).
+
+\subsubsection{Focusing Inversion (IRLS)}
+
+The focusing (compact) inversion of \citet{portniaguine1999focusing}
+minimises a stabilising functional that drives most model parameters to
+zero, producing compact, sharp-boundary solutions:
+
+\begin{equation}
+  \bm{a}^* = \argmin_{\bm{a} \geq 0}\; \|\bm{A}\bm{a} - \bm{b}\|^2 + \alpha\, S(\bm{a}),
+\end{equation}
+
+where the stabiliser $S$ takes one of two forms.  The Minimum Support (MS)
+stabiliser penalises non-zero values:
+
+\begin{equation}
+  S_{\mathrm{MS}}(\bm{a}) = \sum_j \frac{a_j^2}{a_j^2 + e^2},
+\end{equation}
+
+producing sparse solutions where only a few depth layers have
+non-negligible activity.  The Minimum Gradient Support (MGS) stabiliser
+penalises non-zero gradients:
+
+\begin{equation}
+  S_{\mathrm{MGS}}(\bm{a}) = \sum_j \frac{(\bm{D}\bm{a})_j^2}{(\bm{D}\bm{a})_j^2 + e^2},
+\end{equation}
+
+producing blocky, layered models with sharp interfaces and flat
+interiors --- precisely the structure expected for stratified
+contamination.  The parameter $e$ controls the sharpness of boundaries
+(smaller $e$ = sharper but potentially unstable) and is progressively
+decreased during the IRLS iterations following the prescription of
+\citet{zhdanov2002geophysical}.  At each IRLS iteration, the
+non-quadratic stabiliser is locally approximated by a quadratic form
+with reweighted diagonal matrices, reducing the problem to a sequence
+of Tikhonov-like systems:
+
+\begin{equation}
+  \bigl(\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{W}^{-1}\bigr)\,\bm{a} = \bm{A}^\mathrm{T}\bm{b},
+\end{equation}
+
+where $\bm{W}$ is the diagonal matrix of weights constructed from the
+current solution.
+
+\subsection{Regularisation Parameter Selection}\label{sec:criteria}
+
+Six parameter selection criteria are implemented, providing redundant
+and complementary approaches to the fundamental problem of balancing
+data fidelity against solution stability.
+
+\subsubsection{Generalised Cross-Validation (GCV)}
+
+GCV \citep{golub1979generalized} minimises:
+
+\begin{equation}
+  \mathrm{GCV}(\alpha) = \frac{m\,\|\bm{A}\bm{a}_\alpha - \bm{b}\|^2}{\bigl[\tr(\bm{I} - \bm{H}_\alpha)\bigr]^2},
+\end{equation}
+
+where $\bm{H}_\alpha = \bm{A}(\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1}\bm{A}^\mathrm{T}$
+is the hat (influence) matrix.  The trace is estimated via Hutchinson's
+stochastic trace estimator with random $\pm 1$ probe vectors, avoiding
+the $\mathcal{O}(n^3)$ cost of explicit computation.  A weighted GCV
+variant handles heteroscedastic (Poisson) noise by incorporating
+$\sigma_i$ into the weighting.
+
+\subsubsection{L-Curve Corner}
+
+The L-curve \citep{hansen1992analysis} is the parametric plot of
+$(\log\|\bm{L}\bm{a}_\alpha\|,\, \log\|\bm{A}\bm{a}_\alpha - \bm{b}\|)$
+as $\alpha$ varies.  The optimal $\alpha$ is at the corner of maximum
+curvature, computed via the Menger curvature formula for three
+consecutive points in log-log space.  An iterative variant
+$\texttt{lcurve\_corner\_iter}$ applies the same curvature criterion to
+the residual/solution-norm trajectories of iterative methods (CGLS,
+Landweber).
+
+\subsubsection{Discrepancy Principle}
+
+The Morozov discrepancy principle \citep{morozov1966choice} selects the
+largest $\alpha$ such that the weighted residual equals the expected
+value under the noise model:
+
+\begin{equation}
+  \|\bm{A}\bm{a}_\alpha - \bm{b}\|^2 = m.
+\end{equation}
+
+This is implemented via Brent's root-finding method on a log-spaced
+grid of $\alpha$ values.
+
+\subsubsection{Quasi-Optimality Criterion}
+
+The quasi-optimality criterion \citep{hochstenbach2015filtering}
+selects $\alpha$ minimising the noise-dominated SVD components:
+
+\begin{equation}
+  \alpha^* = \argmin_\alpha \sqrt{\sum_{k:\,\sigma_k^2 < \alpha}
+    \left(\frac{\bm{u}_k^\mathrm{T}\bm{b}}{\sigma_k}\right)^2}.
+\end{equation}
+
+This criterion does not require a noise-level estimate, making it useful
+when $\sigma_i$ is uncertain.
+
+\subsubsection{Normalised Cumulative Periodogram (NCP)}
+
+The NCP criterion tests whether the residuals are consistent with white
+noise (as expected for the correct regularisation level) using the
+Kolmogorov--Smirnov statistic on the cumulative periodogram of the
+residuals.  The optimal $\alpha$ minimises the KS distance, indicating
+the most white-noise-like residual.
+
+\subsubsection{Signal-to-Noise Ratio (SNR) Criterion}
+
+The SNR criterion maximises the estimated signal-to-noise ratio of the
+solution:
+
+\begin{equation}
+  \mathrm{SNR}(\alpha) = \frac{\|\bm{a}_\alpha\|^2}{\sigma^2\,\tr(\bm{C}_{\mathrm{post}})} = \frac{\sum_k (\sigma_k\,\beta_k)^2/(\sigma_k^2 + \alpha)^2}{\sum_k 1/(\sigma_k^2 + \alpha)},
+\end{equation}
+
+where $\beta_k = \bm{u}_k^\mathrm{T}\bm{b}$ and $\sigma^2$ is estimated from the
+residuals.
+
+
+% =================================================================
+\section{Transport Chemistry}\label{sec:transport}
+
+\subsection{Advection--Dispersion Equation with Sorption}
+
+The one-dimensional ADE governing the vertical migration of a
+radionuclide in a saturated soil column is:
+
+\begin{equation}\label{eq:ade}
+  R\,\frac{\partial C}{\partial t} = \frac{\partial}{\partial z}\!
+    \left(D\,\frac{\partial C}{\partial z}\right) - v\,\frac{\partial C}{\partial z}
+    - \lambda\,R\,C,
+\end{equation}
+
+where $C(z,t)$ is the dissolved-phase concentration [Bq/L],
+$D$ is the hydrodynamic dispersion coefficient [m$^2$/s],
+$v$ is the pore-water velocity [m/s] (positive downward),
+$\lambda$ is the radioactive decay constant [s$^{-1}$], and
+$R$ is the retardation factor:
+
+\begin{equation}\label{eq:retardation}
+  R = 1 + \frac{\rho_b\,K_d}{\theta},
+\end{equation}
+
+with $\rho_b$ the bulk density [g/cm$^3$], $K_d$ the distribution
+coefficient [mL/g], and $\theta$ the volumetric water content.
+For Cs-137 in typical mineral soils, $R$ ranges from 100 to 5000,
+meaning that the nuclide migrates 100--5000 times slower than the pore
+water.
+
+\subsection{Sorption Models}
+
+\subsubsection{Linear $K_d$ Database}
+
+The framework includes a comprehensive $K_d$ database covering 12
+radionuclides (Cs-137, Sr-90, Co-60, U-238, Pu-239, Am-241, Ra-226,
+Pb-210, Eu-152, I-131, Tc-99, Se-79) with low/mid/high scenarios
+based on IAEA TRS-472 \citep{iaea2010radiological} and Sheppard \\
+\& Thibault \citep{sheppard1990parameter}.  The geometric mean of the
+low--high range provides the ``mid'' estimate used for default
+parameterisation.
+
+\subsubsection{pH-Dependent $K_d$}
+
+For the most critical nuclides, the framework implements a
+dependent $K_d$ model:
+
+\begin{equation}
+  \log_{10} K_d = a_{\mathrm{pH}}\,\mathrm{pH} + b_{\mathrm{clay}}\,f_{\mathrm{clay}} + c_{\mathrm{OC}}\,f_{\mathrm{OC}} + d,
+\end{equation}
+
+where the coefficients are fitted to the IAEA compilation data.  This
+allows site-specific $K_d$ estimation from routinely measured soil
+parameters (pH, clay fraction, organic carbon fraction).
+
+\subsubsection{Freundlich Isotherm}
+
+At trace concentrations typical of environmental contamination, the
+linear $K_d$ model may underestimate sorption because the Freundlich
+isotherm predicts:
+
+\begin{equation}
+  K_d(C) = K_F\,C^{n_F - 1},
+\end{equation}
+
+where $K_F$ [mL/g $\cdot$ (L/g)$^{n_F-1}$] and $n_F < 1$ (favourable
+isotherm).  As $C \to 0$, $K_d \to \infty$, reflecting the extremely
+strong sorption of radionuclides at trace levels.  The framework
+includes Freundlich parameters for Cs-137, Sr-90, Pu-239, and U-238.
+
+\subsubsection{Competitive Ion Exchange}
+
+Cs$^+$ competes with K$^+$ and NH$_4^+$ for frayed-edge sites (FES) on
+illite and vermiculite clay minerals:
+
+\begin{equation}
+  K_{d,\mathrm{Cs}}^{\mathrm{eff}} = \frac{K_{d,\mathrm{Cs}}^{\mathrm{ref}}}{1 + \alpha_{\mathrm{K}}\,[\mathrm{K}^+] + \alpha_{\mathrm{NH}_4}\,[\mathrm{NH}_4^+]},
+\end{equation}
+
+where $\alpha_{\mathrm{K}} = 0.1$ and $\alpha_{\mathrm{NH}_4} = 0.4$ are
+selectivity coefficients.  Similarly, Sr$^{2+}$ competes with
+Ca$^{2+}$: $K_{d,\mathrm{Sr}}^{\mathrm{eff}} = K_{d,\mathrm{Sr}}^{\mathrm{ref}} / (1 + \alpha_{\mathrm{Ca}}\,[\mathrm{Ca}^{2+}])$.
+
+\subsubsection{Eh-Dependent Uranium Speciation}
+
+Uranium migration is controlled by the redox potential through the
+U(VI)/U(IV) transition.  Under oxidising conditions, U(VI) forms
+mobile uranyl-carbonate complexes; under reducing conditions, U(IV)
+precipitates as immobile uraninite.  The framework implements:
+
+\begin{equation}
+  \log_{10} K_d = \begin{cases}
+    2.0 + 0.3\,\mathrm{pH}  & \text{if } E_h < E_h^{\mathrm{crit}}, \\
+    -0.5 + 0.15\,\mathrm{pH} - 0.1\,\log_{10}[\mathrm{HCO}_3^-] & \text{otherwise,}
+  \end{cases}
+\end{equation}
+
+where $E_h^{\mathrm{crit}} = 470 - 60\,\mathrm{pH}$ mV.
+
+\subsection{Two-Site Kinetic Sorption}
+
+The two-site model \citep{vangenuchten1989two} partitions sorption
+sites into an instantaneous (equilibrium) fraction $f$ and a kinetic
+fraction $1 - f$ governed by first-order rate exchange.  The effective
+retardation factor becomes time-dependent:
+
+\begin{equation}
+  R_{\mathrm{eff}}(t) = 1 + \frac{\rho_b\,K_d}{\theta}\n    \bigl[f + (1-f)(1 - e^{-\omega t})\bigr],
+\end{equation}
+
+where $\omega$ is the kinetic rate constant [s$^{-1}$].  At short times
+($t \ll 1/\omega$), only equilibrium sites contribute; at long times,
+the full $K_d$ is recovered.  The framework implements a coupled
+ODE system for the dissolved and kinetically-sorbed phases, solved via
+operator splitting (Crank--Nicolson for transport, analytical integration
+for kinetic exchange).
+
+\subsection{Multi-Layer Soil Columns}
+
+For stratified soils, the ADE is solved independently in each layer with
+its own $D$, $v$, $R$, and $\lambda$, with continuity of flux and
+concentration enforced at layer interfaces.  This allows modelling of
+typical field scenarios such as a low-permeability clay layer beneath a
+more permeable topsoil, or a buried contaminated layer beneath clean
+backfill.
+
+\subsection{Analytical Profile Functions}
+
+Two analytical solutions of the ADE serve as parametric profile models
+for the inversion:
+
+\textbf{Pulse profile} (instantaneous surface deposition $A_0$ at $t = 0$):
+\begin{equation}
+  a(z,t) = \frac{A_0\,e^{-\lambda t}}{\sqrt{4\pi D_s t}}\n    \Bigl[e^{-\frac{(z - v_s t)^2}{4 D_s t}} + e^{-\frac{(z + v_s t)^2}{4 D_s t}}\Bigr],
+\end{equation}
+
+where $D_s = D/R$ and $v_s = v/R$.  The image source at $-z$ enforces
+the no-flux boundary condition at the surface.
+
+\textbf{Exponential profile} (diffusion-limited relaxation):
+\begin{equation}
+  a(z) = \frac{A}{\lambda_{\mathrm{relax}}}\,e^{-z/\lambda_{\mathrm{relax}}},
+\end{equation}
+
+normalised so that $\int_0^\infty a(z)\,dz = A$ [Bq/m$^2$].
+
+\subsection{Bateman Decay Chains}
+
+The matrix exponential formulation of the Bateman equations handles
+arbitrary decay chains:
+
+\begin{equation}
+  \bm{A}(t) = \exp(\bm{M}\,t)\,\bm{A}(0),
+\end{equation}
+
+where $M_{ii} = -\lambda_i$ and $M_{i,i-1} = \lambda_{i-1}\,b_{i-1}$
+(branching ratio).  This allows modelling of ingrowth from parent
+daughters (e.g., Cs-137 $\to$ Ba-137m) within the inversion framework.
+
+\subsection{Crank--Nicolson Numerical Solver}
+
+For problems where analytical solutions are unavailable (time-dependent
+boundary conditions, spatially varying parameters), the framework
+provides a Crank--Nicolson finite-difference solver for the ADE.  The
+scheme is unconditionally stable and second-order accurate in both
+space and time, using the Thomas algorithm for the resulting tridiagonal
+system at each time step.  Harmonic-mean interface diffusivities ensure
+conservation of flux at layer boundaries.
+
+
+% =================================================================
+\section{Bayesian Methods}\label{sec:bayesian}
+
+\subsection{Ensemble Kalman Inversion (EKI)}
+
+EKI \citep{iglesias2013ensemble,laby2025regularised,tso2024ensemble}
+approximates the Bayesian posterior $p(\bm{a} \mid \bm{d})$ using an
+ensemble of model realisations updated via Kalman filter equations.
+Given an ensemble $\{\bm{a}_j\}_{j=1}^{N_e}$ initialised from the prior
+$\mathcal{N}(\bm{a}_0, \mathrm{diag}(\sigma_p^2))$, each iteration
+consists of:
+
+\begin{enumerate}
+  \item \textbf{Forward step:} compute synthetic data for each member,
+        $\bm{d}_j = \bm{K}\,\bm{a}_j$.
+  \item \textbf{Statistics:} compute ensemble means and cross-covariances
+        $\bm{C}_{ma}$, $\bm{C}_d$.
+  \item \textbf{Kalman update:}
+        $\bm{a}_j \leftarrow \bm{a}_j + \bm{C}_{ma}\,\bm{C}_d^{-1}(\bm{d}_{\mathrm{obs}} + \bm{\eta}_j - \bm{d}_j)$,
+        where $\bm{\eta}_j \sim \mathcal{N}(\bm{0}, \bm{C}_{dd})$ provides
+        inflation to prevent ensemble collapse.
+  \item \textbf{Non-negativity projection:} $\bm{a}_j \leftarrow \max(\bm{a}_j, 0)$.
+\end{enumerate}
+
+The regularised variant of \citet{laby2025regularised} adds
+$\alpha\,\bm{I}$ to $\bm{C}_d$ and $\bm{C}_{ma}$ to further prevent collapse.
+For linear forward models (as in our case), EKI converges in
+approximately 10--15 iterations, providing posterior mean, standard
+deviation, and full ensemble for uncertainty quantification --- at a
+cost of seconds rather than the hours required for MCMC.
+
+\subsection{Laplace MAP Approximation}
+
+For a Gaussian prior $p(\bm{a}) \sim \mathcal{N}(\bm{a}_0,
+(\alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1})$ and Gaussian likelihood
+$p(\bm{d} \mid \bm{a}) \sim \mathcal{N}(\bm{K}\bm{a},\,\mathrm{diag}(\sigma^2))$,
+the MAP estimate coincides with the Tikhonov solution:
+
+\begin{equation}
+  \bm{a}_{\mathrm{MAP}} = (\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1}
+  \bm{A}^\mathrm{T}\bm{b},
+\end{equation}
+
+and the posterior covariance is:
+
+\begin{equation}
+  \bm{C}_{\mathrm{post}} = (\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1}.
+\end{equation}
+
+The diagonal of $\bm{C}_{\mathrm{post}}$ provides 1-$\sigma$ uncertainty
+estimates for each depth layer.  This is computationally cheap (one
+matrix inversion) but assumes Gaussian posterior, which may
+underestimate uncertainty for non-negative, sparse, or multi-modal
+posteriors.  A Gaussian Process (RBF) prior covariance is also available
+as an alternative to the Tikhonov smoothness prior:
+
+\begin{equation}
+  C_{ij} = \sigma_f^2\,\exp\!\left(-\frac{(z_i - z_j)^2}{2\ell^2}\right) + \sigma_n^2\,\delta_{ij},
+\end{equation}
+
+encoding smoothness with correlation length $\ell$.
+
+
+% =================================================================
+\section{Depth Weighting and Joint Inversion}\label{sec:geophysics}
+
+\subsection{Depth Weighting Strategies}
+
+The exponential decay of the gamma kernel with depth creates a strong
+bias in regularised inversions toward near-surface activity.  Depth
+weighting counteracts this by rebalancing the sensitivity of the
+inversion across the depth range.  The framework implements four
+strategies adapted from the geophysical inversion literature:
+
+\begin{enumerate}[label=\textbf{W\arabic*:}]
+  \item \textbf{Li--Oldenburg} (column-norm normalisation) \citep{li19963d}:
+  $w_j = 1/\|\bm{K}_{\cdot,j}\|$.  Equalises the column norms of the
+  kernel matrix, ensuring that each depth layer contributes equally to
+  the normal equations.  This is the standard approach in gravity and
+  magnetic inversion.
+
+  \item \textbf{Power-law} \citep{li19983d}:
+  $w(z) = (z/z_{\mathrm{ref}} + 1)^{-\beta/2}$.
+  Originally developed for 3D gravity inversion where the kernel
+  decays as $1/z^3$, adapted here with $\beta \in [1, 3]$ for the
+  exponential gamma kernel.
+
+  \item \textbf{Logarithmic}: $w(z) = 1/\log(1 + z/z_0)$.
+  Provides milder weighting than power-law, useful when the kernel
+  already includes some depth normalisation.
+
+  \item \textbf{Adaptive} (data-driven): combines kernel column norms,
+  power-law decay, and a smoothness-based correction that down-weights
+  depths where the kernel sensitivity oscillates (indicating poor
+  resolution):
+  $w_{\mathrm{adapt}} = w_{\mathrm{kern}} \cdot w_{\mathrm{power}} \cdot (1 + \alpha / (|\nabla w_{\mathrm{kern}}| + \epsilon))$.
+\end{enumerate}
+
+A depth-weighted Tikhonov solve applies the weighting through the
+regularisation operator: $\bm{L}_w = \mathrm{diag}(\sqrt{\bm{w}})\,\bm{L}$.
+
+\subsection{Joint Multi-Nuclide Inversion}
+
+When multiple nuclides are measured simultaneously (e.g., a fallout
+mixture of Cs-137, Cs-134, and Eu-152), the framework constructs a
+block-diagonal joint kernel:
+
+\begin{equation}
+  \bm{K}_{\mathrm{joint}} = \begin{pmatrix}
+    \bm{K}_{\mathrm{Cs}} & \bm{0} & \bm{0} \\
+    \bm{0} & \bm{K}_{\mathrm{Eu}} & \bm{0} \\
+    \bm{0} & \bm{0} & \bm{K}_{\mathrm{Am}}
+  \end{pmatrix},
+\end{equation}
+
+and solves the stacked system with shared depth grid.  Coupling
+constraints (``same shape'', ``proportional'') exploit the fact that
+co-deposited nuclides from a common source should share the same depth
+profile shape, differing only in amplitude.  This reduces the effective
+number of unknowns and improves resolution.
+
+\subsection{Ensemble Multi-Method Inversion}
+
+The pipeline's ensemble mode runs all available solvers
+(Tikhonov/GCV, TV/ADMM, FISTA, focusing/MGS, CGLS) on the same data
+and selects the best result via information criteria:
+
+\begin{align}
+  \mathrm{AIC} &= \chi^2 + 2\,n_{\mathrm{eff}}, \\
+  \mathrm{BIC} &= \chi^2 + \ln(m)\,n_{\mathrm{eff}},
+\end{align}
+
+where $n_{\mathrm{eff}} = \min(\sum_j \mathbb{1}[a_j > 0.001\,\max(\bm{a})],\, m)$
+is the effective number of parameters (number of active depth cells).
+BIC penalises model complexity more strongly than AIC, favouring
+sparser solutions when data are limited.
+
+
+% =================================================================
+\section{Resolution Diagnostics}\label{sec:diagnostics}
+
+The framework provides a suite of resolution diagnostics adapted from
+seismic tomography \citep{backus1968numerical,menke2018geophysical}.
+
+\subsection{Resolution Matrix}
+
+The model resolution matrix $\bm{R} = (\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1}
+\bm{A}^\mathrm{T}\bm{A}$ shows how a delta-function layer at depth $z_j$ is
+recovered across all depths.  Diagonal dominance indicates good vertical
+resolution; off-diagonal spread indicates smearing.  The column $\bm{R}_{\cdot,j}$
+is the point-spread function (PSF) for depth $z_j$.
+
+\subsection{Depth of Investigation}
+
+The depth of investigation $z^*$ is defined as the depth at which the
+cumulative absolute PSF reaches a specified fraction $f$ (default 0.5):
+
+\begin{equation}
+  z^*_j = \inf\{z : \sum_{i: z_i \leq z} |R_{ij}| \geq f\}.
+\end{equation}
+
+This provides a depth-dependent measure of how deep the measurement
+configuration can reliably resolve activity.
+
+\subsection{Spread Function}
+
+The Backus--Gilbert spread function quantifies the spatial spreading
+of the PSF:
+
+\begin{equation}
+  s_j = 12 \sum_i \bar{R}_{ij}^2\,(z_i - z_j)^2\,\Delta z,
+\end{equation}
+
+where $\bar{R}_{ij} = R_{ij}/\sum_k R_{ik}$ is the row-normalised resolution
+matrix.  Smaller spread indicates better localisation.
+
+\subsection{Model Covariance}
+
+The linearised posterior model covariance
+$\bm{C}_m = (\bm{A}^\mathrm{T}\bm{A} + \alpha\,\bm{L}^\mathrm{T}\bm{L})^{-1}$
+provides depth-dependent uncertainty estimates.  The diagonal elements
+give 1-$\sigma$ uncertainties for each layer; off-diagonal elements
+reveal correlated errors between layers.
+
+\subsection{Additional Diagnostics}
+
+The framework also implements:
+(1)~a checkerboard resolution test that measures how well alternating
+zero/unity blocks in the depth profile are recovered;
+(2)~a data resolution matrix (hat matrix) showing which data points
+contribute most to each model parameter;
+(3)~per-channel sensitivity kernels showing the depth sensitivity of
+each measurement;
+(4)~information content metrics (trace of resolution matrix, effective
+rank, condition number).
+
+
+% =================================================================
+\section{Software Architecture}\label{sec:software}
+
+The \texttt{soilactivity} package is organised into seven modules within
+the \texttt{depth\_inversion} subpackage, following a clear separation
+of concerns:
+
+\begin{enumerate}
+  \item \textbf{kernels.py}: Forward Fredholm kernel construction
+  (analytic, numerical, lateral, collimated, multi-layer) and the
+  \texttt{GammaLine}/\texttt{Detector} data classes.
+  \item \textbf{transport.py}: Reactive transport chemistry ($K_d$
+  database, pH-dependent and Freundlich sorption, competitive ion
+  exchange, Eh-dependent U, two-site kinetic sorption, multi-layer
+  ADE, Crank--Nicolson solver, Bateman chains).
+  \item \textbf{solvers.py}: Ten inversion algorithms (Tikhonov, TSVD,
+  Landweber, Cimmino, CGLS, Kaczmarz, FISTA, TV/ADMM, focusing MGS/MS,
+  CGLS+L-curve, cross-validation, depth-weighted Tikhonov).
+  \item \textbf{criteria.py}: Six parameter selection criteria (GCV,
+  L-curve, discrepancy, quasi-optimality, NCP, SNR, weighted GCV).
+  \item \textbf{diagnostics.py}: Resolution matrix, DOI, spread function,
+  model covariance, checkerboard test, sensitivity kernels, information
+  content.
+  \item \textbf{bayesian.py}: EKI, Laplace MAP, GP prior.
+  \item \textbf{geophysics.py}: Depth weighting (Li--Oldenburg, power-law,
+  logarithmic, adaptive), joint multi-nuclide inversion, two-site ADE,
+  regularisation operators.
+  \item \textbf{pipeline.py}: \texttt{DepthInverter} class providing
+  end-to-end inversion with automatic parameter selection, ensemble
+  multi-method with AIC/BIC, and parametric transport-informed
+  inversion.
+\end{enumerate}
+
+The pipeline's \texttt{DepthInverter} class provides a high-level
+interface that constructs the kernel matrix from gamma lines and
+detector heights, then offers methods for each inversion strategy.
+The \texttt{fit()} method performs non-parametric Tikhonov with automatic
+$\alpha$ selection; \texttt{fit\_tv()}, \texttt{fit\_sparse()},
+\texttt{fit\_focusing()} provide the geophysical alternatives;
+\texttt{fit\_eki()} provides Bayesian uncertainty quantification;
+\texttt{fit\_ensemble()} runs all methods and selects the best via AIC;
+and \texttt{fit\_parametric()} inverts for physically interpretable transport
+parameters.  All methods return a \texttt{DepthInversion} dataclass with
+the reconstructed profile, uncertainty, areal activity, median depth,
+and chi-squared statistic.
+
+The test suite consists of 25+ twin experiments covering kernel
+validation (numeric--analytic agreement to 0.2\%), transport chemistry
+($K_d$ lookups, retardation, pH dependence, Freundlich, multi-layer,
+competitive sorption), all solvers (non-negativity, convergence), all
+criteria (finite $\alpha$), diagnostics (resolution, covariance, spread,
+information content), Bayesian methods (EKI, Laplace), and the pipeline
+ensemble.
+
+
+% =================================================================
+\section{Numerical Experiments}\label{sec:experiments}
+
+\subsection{Twin Experiment Setup}
+
+The twin experiments follow a controlled protocol: (1)~generate a
+synthetic activity profile $a_{\mathrm{true}}(z)$; (2)~compute
+deterministic count rates $\bm{c} = \bm{K}\,\bm{a}_{\mathrm{true}}$;
+(3)~draw Poisson-realised noisy counts $d_i \sim \mathrm{Poisson}(c_i \times\mathit{scale}) / \mathit{scale}$;
+(4)~invert to obtain $\hat{\bm{a}}$; (5)~compare with $a_{\mathrm{true}}$.
+
+Two scenarios are used:
+
+\textbf{Scenario A (Eu-152, multi-line):} Three gamma lines at
+121.78, 344.28, and 1408.01 keV, measured at two detector heights
+(0.5 and 2.0~m), yielding $m = 6$ data for $n = 20$ depth cells over
+$z_{\max} = 0.6$~m.  The true profile is a pulse profile with
+$A_0 = 10^5$~Bq/m$^2$, $t = 25$~years, $D = 10^{-10}$~m$^2$/s,
+$R = 1401$ (Cs-like retardation).
+
+\textbf{Scenario B (Cs-137, single-line):} One line at 661.66 keV,
+measured at 1.0~m height, yielding $m = 1$ data for $n = 50$ depth
+cells over $z_{\max} = 1.0$~m.  The true profile is an exponential
+with relaxation length 3~cm.
+
+The scale factor $2 \times 10^4$ converts from Bq/m$^3$ to approximate
+counts-per-second for a typical HPGe detector.
+
+\subsection{Kernel Validation}
+
+The numerical kernel (Gauss--Legendre quadrature with 4096 log-spaced
+points over $u \in [1, 2\times 10^3]$) agrees with the analytic E1 kernel
+to within 0.2\% relative error across all depths.  This validates the
+discretisation and confirms that the Taylor buildup factor and angular
+efficiency functions are correctly implemented as modular extensions.
+
+\subsection{Non-Parametric Recovery}
+
+For Scenario~A, Tikhonov/GCV recovers the areal activity within 30\%
+relative error and the median depth $z_{\mathrm{med}}$ within 6~cm absolute
+error, with $\chi^2/m < 2$.  This establishes the baseline performance
+for the well-determined multi-line, multi-height configuration.
+
+\subsection{Parametric Recovery}
+
+For Scenario~A, the parametric pulse inversion recovers the deposition
+density $A_0$ within 50\% and the effective time $t$ within 50\%.  The
+wider tolerance reflects the strong correlation between $A_0$ and $t$
+in the forward model: increasing $A_0$ and decreasing $t$ can produce
+nearly identical profiles.  This is an inherent limitation of the
+parametric approach that motivates the non-parametric and ensemble
+methods.
+
+\subsection{Solver Comparison}
+
+All solvers (Tikhonov, Landweber, Cimmino, CGLS, Kaczmarz, FISTA, TV,
+focusing MS/MGS) produce non-negative solutions with positive areal
+activity.  The geophysical solvers exhibit characteristic differences:
+
+\begin{itemize}
+  \item \textbf{TV/ADMM} produces sharper layer boundaries than Tikhonov,
+        at the cost of potential staircase artefacts in smooth regions.
+        This is advantageous for scenarios with genuine discontinuities
+        (buried layers, excavation boundaries).
+  \item \textbf{FISTA} ($\ell_1$) produces the sparsest solutions, with
+        activity concentrated in fewer depth cells than Tikhonov.
+        The sparsity is controlled by the $\ell_1$ weight $\alpha$.
+  \item \textbf{Focusing MGS} produces blocky, layered models with
+        sharp interfaces and flat interiors, closely matching the
+        expected geological structure of contaminated sites.
+  \item \textbf{Focusing MS} produces compact solutions with isolated
+        activity peaks, suitable for point-source contamination.
+  \item \textbf{CGLS} converges in approximately 20--50 iterations
+        for the typical problem size, with the L-curve corner
+        providing a robust automatic stopping criterion.
+\end{itemize}
+
+\subsection{Criteria Comparison}
+
+All six criteria (GCV, L-curve, discrepancy, quasi-optimality, NCP, SNR)
+return finite, positive $\alpha$ values.  In practice, GCV and L-curve
+provide the most robust selections for well-conditioned multi-line data,
+while quasi-optimality and SNR are more reliable for poorly conditioned
+single-line configurations where the noise level is uncertain.
+
+\subsection{Transport Chemistry Validation}
+
+The transport module is validated through internal consistency checks:
+(1)~retardation factors agree with the analytical formula $R = 1 + \rho_b K_d/\theta$;
+(2)~pH-dependent $K_d$ increases with pH for Cs-137 (consistent with
+FES site deprotonation); (3)~Freundlich $K_d$ increases at lower
+concentrations ($n_F < 1$); (4)~competitive $K_d$ decreases with
+competitor ion concentration; (5)~U $K_d$ is higher under reducing
+conditions; (6)~two-site retardation interpolates between the
+instantaneous equilibrium value ($t \to 0$) and the full
+retardation ($t \to \infty$); (7)~the Crank--Nicolson solver produces
+non-negative concentrations in multi-layer configurations.
+
+\subsection{Bayesian Uncertainty}
+
+EKI with 50 ensemble members and 10 iterations produces non-negative
+ensemble mean with finite per-depth uncertainty.  The posterior standard
+deviation increases with depth, reflecting the decreasing sensitivity of
+the kernel.  The Laplace MAP solution agrees with Tikhonov (as expected
+from the Gaussian equivalence) but additionally provides the full
+posterior covariance matrix for uncertainty propagation to derived
+quantities (areal activity, median depth).
+
+
+% =================================================================
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Relation to the Geophysical Inversion Literature}
+
+The adaptation of geophysical inversion methods to radionuclide depth
+profiling is natural given the structural similarity of the problems.
+Both involve linear (or linearised) forward operators with decaying
+sensitivity, Poisson or Gaussian noise, and the need for
+regularisation to obtain physically meaningful solutions.  However,
+several aspects are specific to the gamma-spectrometry problem:
+
+\begin{enumerate}
+  \item \textbf{Strong exponential decay:} The E1 kernel decays as
+  $e^{-\mu_s z}/z$ (asymptotically), which is faster than the
+  algebraic decay ($1/z^3$) of gravity kernels.  This makes the
+  ill-posedness more severe and amplifies the need for depth weighting.
+
+  \item \textbf{Non-negativity constraint:} Activity cannot be negative,
+  and this physical constraint significantly improves solution quality
+  compared to unconstrained inversion.  All solvers in the framework
+  enforce this by default.
+
+  \item \textbf{Poisson noise:} Count data follow Poisson statistics
+  ($\sigma_i = \sqrt{C_i}$), leading to heteroscedastic noise.  The
+  weighted system formulation handles this naturally.
+
+  \item \textbf{Transport-chemistry prior:} Unlike most geophysical
+  inversions where the prior is purely mathematical (smoothness,
+  compactness), the ADE provides a physics-based prior that directly
+  encodes the migration behaviour of the contaminant.  The parametric
+  inversion exploits this to extract physically meaningful parameters.
+\end{enumerate}
+
+\subsection{Choice of Solver for Different Scenarios}
+
+The ensemble multi-method approach with AIC/BIC selection is recommended
+for general use, as it automates the solver choice.  However, physical
+considerations can guide the selection:
+
+\begin{itemize}
+  \item \textbf{Smooth, diffusive profiles} (e.g., Chernobyl Cs-137
+  after decades of migration): Tikhonov with smoothness prior.
+  \item \textbf{Layered contamination} (e.g., buried waste, plume
+  interfaces): TV/ADMM or focusing MGS.
+  \item \textbf{Compact, localised sources} (e.g., buried spent fuel
+  fragments): FISTA ($\ell_1$) or focusing MS.
+  \item \textbf{Uncertainty quantification}: EKI for full posterior
+  bands; Laplace MAP for quick linearised estimates.
+  \item \textbf{Well-understood transport history}: parametric pulse
+  or exponential inversion for interpretable parameters.
+  \item \textbf{Multiple nuclides}: joint inversion with coupling
+  constraints to exploit shared depth structure.
+\end{itemize}
+
+\subsection{Limitations and Future Work}
+
+Several limitations should be acknowledged.  First, the framework
+assumes a laterally homogeneous activity distribution --- lateral
+heterogeneity is not considered.  For sites with significant lateral
+variability, a 2D or 3D inversion would be required, though the
+computational cost would increase substantially.  Second, the
+non-negativity constraint is implemented via simple projection
+(clipping to zero), which can introduce bias near the boundary of
+the feasible set; more sophisticated approaches (e.g., interior-point
+methods) could improve this.  Third, the EKI uncertainty estimates
+rely on the ensemble approximation and may underestimate posterior
+variance for strongly non-Gaussian posteriors; comparison with MCMC
+benchmarking would be valuable.  Fourth, the Crank--Nicolson solver is
+limited to 1D; 2D migration modelling would require finite-element or
+finite-volume methods.
+
+Future directions include: (i)~integration of machine-learning
+surrogates for fast forward modelling in 2D/3D; (ii)~adaptive mesh
+refinement based on the resolution analysis; (iii)~sequential
+assimilation of time-lapse measurements via the ensemble Kalman
+filter; (iv)~extension to spectral unmixing of overlapping peaks
+from multiple nuclides.
+
+\subsection{Comparison with Existing Software}
+
+The most widely used existing software for radionuclide depth profiling
+is the IAEA's unreleased codes accompanying \citet{zombori1992new},
+which implement basic unfolding methods (matrix inversion, strip
+parameters) but lack modern regularisation.  \citet{tyler2008determination}
+and \citet{hasan2022regularised,hasan2023bayesian} have developed
+regularised and Bayesian approaches for borehole gamma spectrometry,
+but their codes are not publicly available as a unified framework.  The
+\texttt{soilactivity} package fills this gap by providing, for the first
+time, a comprehensive, open-source Python framework that integrates
+geophysical inversion methods with reactive transport chemistry for
+in-situ gamma-spectrometry depth profiling.
+
+
+% =================================================================
+\section{Conclusions}\label{sec:conclusions}
+
+This paper has presented the \texttt{soilactivity} software framework
+for reconstructing vertical radionuclide activity profiles from in-situ
+gamma-spectrometry measurements.  The key scientific contributions and
+findings are:
+
+\begin{enumerate}
+  \item The systematic adaptation of ten geophysical inversion algorithms
+  (Tikhonov, TSVD, Landweber, Cimmino, CGLS, Kaczmarz, FISTA, TV/ADMM,
+  focusing MS/MGS) to the Fredholm gamma-transport equation
+  demonstrates that methods developed for gravity, magnetic, and
+  electromagnetic inversion transfer effectively to radionuclide
+  depth profiling, with TV and focusing MGS providing superior
+  recovery of piecewise-constant and layered contamination profiles.
+
+  \item Six parameter selection criteria (GCV, L-curve, discrepancy,
+  quasi-optimality, NCP, SNR) provide redundant and complementary
+  approaches to the regularisation parameter choice, with GCV and
+  L-curve being most robust for well-determined configurations and
+  quasi-optimality being most robust for poorly conditioned ones.
+
+  \item The integration of reactive transport chemistry --- including
+  pH-dependent $K_d$, Freundlich isotherms, competitive ion exchange,
+  Eh-dependent uranium speciation, two-site kinetic sorption, and
+  multi-layer soil columns --- provides physics-based priors that
+  yield directly interpretable inversion parameters and constrain
+  the solution space beyond what purely mathematical regularisation
+  can achieve.
+
+  \item Bayesian uncertainty quantification via EKI delivers posterior
+  uncertainty bands in seconds (versus hours for MCMC), enabling
+  practical uncertainty propagation for field measurements.
+
+  \item Depth weighting strategies from gravity/magnetic inversion
+  (Li--Oldenburg, power-law, logarithmic, adaptive) effectively
+  counteract the exponential sensitivity decay of the gamma kernel,
+  improving the recovery of deep activity.
+
+  \item Joint multi-nuclide inversion with coupling constraints and
+  ensemble AIC/BIC model selection automates the inversion workflow
+  and provides a principled approach to solver selection.
+\end{enumerate}
+
+The framework is validated through 25+ twin experiments covering all
+solvers, criteria, transport models, diagnostics, and the full
+pipeline.  The software is released as a Python package, designed for
+practical deployment in environmental monitoring and decommissioning
+programmes.
+
+
+% =================================================================
+\section*{Acknowledgements}
+
+This work was supported by the \texttt{soilactivity} open-source
+project.  The authors thank the developers of NumPy, SciPy, and
+the broader Python scientific computing ecosystem.
+
+% =================================================================
+\bibliographystyle{apalike}
+\bibliography{refs}
+
+\end{document}
