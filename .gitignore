@@ -9,16 +9,6 @@ wheels/
 # Virtual environments
 .venv
 data/measurements.csv
-examples/result_activity.npz
-examples/fig_chernobyl_comparison.png
-examples/fig_chernobyl_dose.png
-examples/fig_chernobyl_fredholm.png
-examples/fig_chernobyl_lorenz.png
-examples/fig_chernobyl_maps.png
-examples/fig_chernobyl_profiles.png
-examples/fig_semei_comparison.png
-examples/fig_semei_dose.png
-examples/fig_semei_fredholm.png
-examples/fig_semei_geography.png
-examples/fig_semei_lorenz.png
-examples/fig_semei_maps.png
+examples/*.npz
+examples/*.png
+examples/bssunfold_methods/*.png
