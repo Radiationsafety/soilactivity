@@ -324,7 +324,7 @@ _Z_OF = {
 
 # Common short symbols -> ANS material names
 _ELEMENT_ALIASES = {
-    "Be": "Beryllium", "B": "Boron", "C": "Carbon", "N": "Nitrogen",
+    "H": "Hydrogen", "Be": "Beryllium", "B": "Boron", "C": "Carbon", "N": "Nitrogen",
     "O": "Oxygen", "Na": "Sodium", "Mg": "Magnesium", "Al": "Aluminum",
     "Si": "Silicon", "P": "Phosphorus", "S": "Sulphur", "Ar": "Argon",
     "K": "Potassium", "Ca": "Calcium", "Fe": "Iron", "Cu": "Copper",
