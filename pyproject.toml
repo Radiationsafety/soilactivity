@@ -7,7 +7,7 @@ name = "soilactivity"
 version = "0.4.0"
 description = "3D reconstruction of radionuclide volumetric activity in soil from MAED measurements."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
@@ -22,6 +22,7 @@ dependencies = [
     "pygments>=2.21.0",
     "ipywidgets>=8.1.9",
     "nbformat>=5.10.4",
+    "bssunfold[all]==0.19.1",
 ]
 
 [project.optional-dependencies]
