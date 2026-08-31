@@ -38,7 +38,8 @@ set(B1SOIL_PYTHON
     python/b1soil_io.py
     python/make_model_macro.py
     python/build_sensitivity.py
-    python/reconstruct.py)
+    python/reconstruct.py
+    python/visualize.py)
 
 foreach(_script ${B1SOIL_MACROS} ${B1SOIL_PYTHON})
   configure_file(${PROJECT_SOURCE_DIR}/${_script}

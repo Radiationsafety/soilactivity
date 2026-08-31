@@ -58,11 +58,11 @@ def make_plots(cfg: GridConfig, x_true, x_mlem, x_tik, b, out_png: Path):
     for ax, (img, title, log) in zip(axes, panels):
         vmax = img.max()
         if log and vmax > 0:
-            im = ax.imshow(img, origin="upper", extent=extent, cmap="hot",
+            im = ax.imshow(img, origin="lower", extent=extent, cmap="hot",
                            norm=matplotlib.colors.LogNorm(vmin=max(img.min(), vmax * 1e-4),
                                                           vmax=vmax))
         else:
-            im = ax.imshow(img, origin="upper", extent=extent, cmap="viridis")
+            im = ax.imshow(img, origin="lower", extent=extent, cmap="viridis")
         fig.colorbar(im, ax=ax, shrink=0.85)
         ax.set_title(title, fontsize=10)
         ax.set_xlabel("x, м")
