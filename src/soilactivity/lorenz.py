@@ -74,7 +74,7 @@ def lorenz_gini_coefficient(values: np.ndarray) -> float:
     """
     x, y = lorenz_curve(values)
     # Trapezoidal integral of Lorenz curve
-    area = np.trapz(y, x)
+    area = np.trapezoid(y, x)
     gini = 1.0 - 2.0 * area
     return float(max(gini, 0.0))
 
