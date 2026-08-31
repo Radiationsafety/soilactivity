@@ -1,0 +1,5 @@
+# Внутренний уровень цикла матрицы чувствительности:
+# фиксируем позицию детектора, перебираем ячейки источника.
+# (Вызывается из sensitivity.mac: /control/loop sensitivity_det.mac detIdx 0 24 1)
+/b1soil/setDetIndex {detIdx}
+/control/loop sensitivity_src.mac srcIdx 0 24 1

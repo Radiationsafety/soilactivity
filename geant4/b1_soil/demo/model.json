@@ -1,0 +1,25 @@
+{
+  "grid": {
+    "nx": 5,
+    "ny": 5,
+    "cell_size_m": 2.0,
+    "src_depth_m": 0.1
+  },
+  "cells": [
+    {
+      "ix": 1,
+      "iy": 1,
+      "activity_Bq": 100000000.0
+    },
+    {
+      "ix": 2,
+      "iy": 2,
+      "activity_Bq": 200000000.0
+    },
+    {
+      "ix": 3,
+      "iy": 2,
+      "activity_Bq": 50000000.0
+    }
+  ]
+}

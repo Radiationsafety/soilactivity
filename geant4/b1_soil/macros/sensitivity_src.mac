@@ -1,0 +1,4 @@
+# Самый внутренний уровень цикла: источник в ячейку srcIdx, прогон beamOn.
+# (Вызывается из sensitivity_det.mac)
+/b1soil/setSrcIndex {srcIdx}
+/run/beamOn {b1soilN}

@@ -1,0 +1,5 @@
+# Внутренний уровень цикла модельного измерения:
+# детектор в ячейку detIdx, прогон с модельным источником.
+# (Вызывается из model_source.mac)
+/b1soil/setDetIndex {detIdx}
+/run/beamOn {b1soilNmodel}

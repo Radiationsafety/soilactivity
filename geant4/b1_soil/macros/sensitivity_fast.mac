@@ -1,0 +1,30 @@
+# ============================================================================
+# sensitivity_fast.mac - МАТРИЦА ЧУВСТВИТЕЛЬНОСТИ A, быстрый вариант
+# ============================================================================
+# Все 25 сфер-детекторов находятся в сцене одновременно. Физически это
+# эквивалентно поочерёдному размещению: воздух на 662 кэВ практически
+# прозрачен (искажение < 0.01%), а взаимные переотражения между сферами
+# пренебрежимы. Один прогон на ячейку источника даёт сразу всю строку A.
+# Итого 25 прогонов вместо 625.
+# ============================================================================
+/control/alias b1soilN 2000000
+
+/b1soil/setGridNx 5
+/b1soil/setGridNy 5
+/b1soil/setCellSize 2 m
+/b1soil/setSrcDepth 10 cm
+/b1soil/setSoilDepth 2 m
+/b1soil/setDetHeight 1 m
+/b1soil/setDetRadius 15 cm
+/b1soil/setSoilDensity 1.6 g/cm3
+/b1soil/setGammaLine Cs137
+
+/b1soil/setDetMode all
+/b1soil/setRunType SENSITIVITY
+/b1soil/setOutputFile results_sensitivity.csv
+
+/run/setCut 1 mm
+/run/initialize
+/run/numberOfThreads 4
+
+/control/loop sensitivity_src.mac srcIdx 0 24 1

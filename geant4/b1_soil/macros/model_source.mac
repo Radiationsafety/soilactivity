@@ -1,0 +1,39 @@
+# ============================================================================
+# model_source.mac - МОДЕЛЬНЫЙ ИСТОЧНИК: "измерения" МАЭД (строгий вариант)
+# ============================================================================
+# Модельный источник (см. macros/model_cells.mac, генерируется скриптом
+# python/make_model_macro.py) размещается в грунте. Детектор поочерёдно
+# ставится во все 25 позиций на высоте 1 м; в каждой позиции выполняется
+# прогон - получается вектор измерений b[i] = sum_j A[i][j] * x[j],
+# который в python/reconstruct.py разворачивается в активности x.
+#
+# Одно событие = один распад; ячейка распада выбирается случайно
+# пропорционально активности ячейки.
+# ============================================================================
+/control/alias b1soilNmodel 10000000
+
+/b1soil/setGridNx 5
+/b1soil/setGridNy 5
+/b1soil/setCellSize 2 m
+/b1soil/setSrcDepth 10 cm
+/b1soil/setSoilDepth 2 m
+/b1soil/setDetHeight 1 m
+/b1soil/setDetRadius 15 cm
+/b1soil/setSoilDensity 1.6 g/cm3
+/b1soil/setGammaLine Cs137
+
+# --- ячейки и активности модельного источника ---
+/b1soil/clearModelCells ""
+/control/execute model_cells.mac
+/b1soil/useModelSource true
+
+# --- строго поочерёдный обход позиций детектора ---
+/b1soil/setDetMode single
+/b1soil/setRunType MODEL
+/b1soil/setOutputFile results_model.csv
+
+/run/setCut 1 mm
+/run/initialize
+/run/numberOfThreads 4
+
+/control/loop model_source_det.mac detIdx 0 24 1
